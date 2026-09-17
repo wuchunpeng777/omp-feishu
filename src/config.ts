@@ -1,5 +1,8 @@
 /** 从环境变量读取桥接配置。 */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 export type FeishuDomain = "feishu" | "lark";
 
 export type AppConfig = {
@@ -9,6 +12,8 @@ export type AppConfig = {
   allowOpenIds: Set<string>;
   ompBin: string;
   displayName: string;
+  cwd: string;
+  dataDir: string;
 };
 
 function optional(name: string, fallback: string): string {
@@ -38,12 +43,15 @@ export function loadBotConfig(): AppConfig {
     allowOpenIds: new Set(allow),
     ompBin: optional("OMP_BIN", "omp"),
     displayName: optional("OMP_DISPLAY_NAME", "飞书"),
+    cwd: optional("OMP_CWD", process.cwd()),
+    dataDir: optional("OMP_FEISHU_DATA", join(homedir(), ".omp-feishu")),
   };
 }
 
-export function loadOmpConfig(): Pick<AppConfig, "ompBin" | "displayName"> {
+export function loadOmpConfig(): Pick<AppConfig, "ompBin" | "displayName" | "cwd"> {
   return {
     ompBin: optional("OMP_BIN", "omp"),
     displayName: optional("OMP_DISPLAY_NAME", "飞书"),
+    cwd: optional("OMP_CWD", process.cwd()),
   };
 }

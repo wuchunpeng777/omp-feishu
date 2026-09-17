@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "飞书挂载本机 omp collab 会话：列表、接入、看完整流程、发 prompt",
+  "description": "飞书对话直接用 omp，也可挂本机 collab 会话看完整流程",
   "scripts": {
     "start": "bun src/index.ts",
     "dev": "bun --watch src/index.ts",

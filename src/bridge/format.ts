@@ -80,6 +80,7 @@ function toolArgSummary(args: unknown): string {
 export function formatSnapshot(
   snap: GuestSnapshot,
   hostLabel: string,
+  opts?: { showLeave?: boolean },
 ): CardView {
   const streaming = snap.state?.isStreaming === true;
   const status = snap.error
@@ -177,7 +178,9 @@ export function formatSnapshot(
   if (!snap.readOnly && snap.status === "live") {
     buttons.push({ text: "打断", action: "abort", type: "danger" });
   }
-  buttons.push({ text: "离开", action: "leave", type: "default" });
+  if (opts?.showLeave !== false) {
+    buttons.push({ text: "离开", action: "leave", type: "default" });
+  }
   if (snap.uiRequest?.options && !snap.readOnly) {
     for (const option of snap.uiRequest.options.slice(0, 6)) {
       buttons.push({
@@ -239,15 +242,18 @@ export function formatHostList(
   };
 }
 
-export const HELP_TEXT = `挂到本机正在跑的 omp（形态 B）。
+export const HELP_TEXT = `飞书里直接用 omp（A），也可以挂本机 TUI（B）。
 
-**命令**
-- \`/list\` 列出本机 collab 会话
-- \`/attach [序号|pid|id]\` 接入（可写）
-- \`/view [序号|pid|id]\` 只读接入
-- \`/leave\` 离开
-- \`/abort\` 打断当前轮
-- \`/status\` 当前绑定
-- 接入后直接发文字 = 给 omp 的 prompt
+**A · 飞书会话**
+- 直接发文字：开/续这条对话的 \`omp --mode rpc\`
+- \`/new\` 新开会话
+- \`/cwd <目录>\` 换工作目录
+- \`/abort\` 打断
 
-先在 omp TUI 执行 \`/collab\`。`;
+**B · 挂已有 TUI**
+- \`/list\` 列出本机 collab
+- \`/attach [序号|pid|id]\` 接入
+- \`/view [序号]\` 只读
+- \`/leave\` 离开 collab，回到 A
+
+\`/status\` 当前绑定。群里要 @机器人 或打 \`/\`。`;

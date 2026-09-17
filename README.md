@@ -1,10 +1,11 @@
 # omp-feishu
 
-飞书里挂到**本机正在跑的 omp TUI 会话**（形态 B）。
+飞书里直接对话就能用 omp，也能挂到**本机正在跑的 omp TUI**。
 
-在飞书发 `/list` → `/attach 1`，之后这条对话就是那个 omp：能 prompt、能打断、卡片上能看到工具 / 子代理 / 流式输出。
+- **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上流式看输出 / 工具 / 子代理。
+- **B**：`/list` → `/attach 1` 接到已经 `/collab` 的 TUI。同一套卡片。
 
-本机执行工具。飞书只是遥控和流程窗口。
+飞书只是遥控和流程窗口，不经过公网 URL。
 
 ## 要求
 
@@ -38,18 +39,14 @@ cp .env.example .env
 
 群里建议配 `FEISHU_ALLOW_OPEN_IDS`，否则谁 @ 都能驱动你这台机器。
 
+可选：
+
+```
+OMP_CWD=/path/to/repo          # A 默认工作目录，也可用 /cwd 换
+OMP_FEISHU_DATA=~/.omp-feishu  # 飞书 chat → 会话文件映射
+```
+
 ## 跑
-
-本机 omp 先分享会话：
-
-```
-# TUI 里
-/collab
-```
-
-或 settings 里 `collab.autoStart: control`，每个交互会话自动上册。
-
-然后：
 
 ```bash
 bun start
@@ -59,27 +56,40 @@ bun start
 
 | 命令 | 作用 |
 | --- | --- |
+| 普通文字 | A：发给这条对话的 `omp --mode rpc`；若已 `/attach` 则发给 TUI |
+| `/new` | A 新开会话 |
+| `/cwd [目录]` | A 查看 / 换工作目录 |
 | `/list` | 列出本机 live collab |
-| `/attach 1` | 按序号 / pid / instanceId 接入（可写） |
-| `/view 1` | 只读接入 |
-| 普通文字 | 发给已接入的 omp |
+| `/attach 1` | 按序号 / pid / instanceId 接入 TUI（可写） |
+| `/view 1` | 只读接入 TUI |
+| `/leave` | 离开 collab，回到 A |
 | `/abort` | 打断当前轮 |
-| `/leave` | 断开 |
 | `/status` | 当前绑定 |
 | `/help` | 帮助 |
 
-卡片按钮：接入、打断、离开、回答主机 `ask`。
+卡片按钮：打断、离开（仅 B）、回答主机 `ask`。
+
+每条飞书对话记住自己的 omp 会话文件（`~/.omp-feishu/chats.json`），下次还是接着聊。
 
 ## 不经过飞书自测
 
 ```bash
-bun run list
-bun src/index.ts attach 1          # 终端里看流程，stdin 当 prompt
 bun test
+bun src/index.ts list
+bun src/index.ts attach 1          # 终端里看 B，stdin 当 prompt
+bun src/index.ts rpc               # 终端里看 A
+bun src/index.ts prompt "只回 ping"
 ```
 
 ## 形态
 
-当前只做 **B：挂已有 TUI**。A（飞书里新开 `omp --mode rpc` 会话）还没做。
+```
+飞书文字 ──► omp-feishu
+               ├─ 默认 A：本机 `omp --mode rpc`（JSONL）
+               └─ /attach B：collab guest（AES-256-GCM, proto 3）
+                      │
+                      ▼
+               本机执行工具，卡片 patch 流程
+```
 
-接入走官方口子：`omp collab list --json` + `omp collab link`，guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同（AES-256-GCM，proto 3）。
+接入 B 走官方口子：`omp collab list --json` + `omp collab link`，guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。

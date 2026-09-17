@@ -1,5 +1,6 @@
-/** 飞书对话绑定本机 collab guest，并把流程卡片持续 patch。 */
+/** 飞书对话：默认 RPC 会话（A），/attach 挂本机 collab（B）。 */
 
+import { resolve } from "node:path";
 import {
   fetchCollabLink,
   listCollabHosts,
@@ -11,6 +12,8 @@ import { connectGuest, type CollabGuest } from "../collab/guest.ts";
 import type { GuestSnapshot } from "../collab/types.ts";
 import type { AppConfig } from "../config.ts";
 import type { CardAction, FeishuApi, IncomingMessage } from "../feishu/bot.ts";
+import { RpcSession } from "../rpc/session.ts";
+import { ChatStore, storePath } from "../rpc/store.ts";
 import {
   formatHostList,
   formatSnapshot,
@@ -18,23 +21,36 @@ import {
   type CardView,
 } from "./format.ts";
 
-type Binding = {
-  host: CollabHost;
-  access: CollabAccess;
-  guest: CollabGuest;
+type CardPump = {
   cardMessageId?: string;
   lastKey?: string;
   timer?: ReturnType<typeof setTimeout>;
   pending?: CardView;
 };
 
+type CollabBinding = CardPump & {
+  kind: "collab";
+  host: CollabHost;
+  access: CollabAccess;
+  guest: CollabGuest;
+};
+
+type RpcBinding = CardPump & {
+  kind: "rpc";
+  session: RpcSession;
+};
+
 export class Bridge {
-  private readonly bindings = new Map<string, Binding>();
+  private readonly collab = new Map<string, CollabBinding>();
+  private readonly rpc = new Map<string, RpcBinding>();
+  private readonly store: ChatStore;
 
   constructor(
     private readonly config: AppConfig,
     private readonly feishu: FeishuApi,
-  ) {}
+  ) {
+    this.store = new ChatStore(storePath(config.dataDir));
+  }
 
   allowed(openId: string): boolean {
     if (this.config.allowOpenIds.size === 0) return true;
@@ -56,23 +72,40 @@ export class Bridge {
       await this.dispatch(msg, command.name, command.arg);
       return;
     }
-    const bound = this.bindings.get(msg.chatId);
-    if (!bound) {
+
+    const collab = this.collab.get(msg.chatId);
+    if (collab) {
+      const ui = collab.guest.snapshot().uiRequest;
+      if (ui) {
+        collab.guest.sendUiResponse(ui.reqId, text);
+        return;
+      }
+      if (collab.access !== "control") {
+        await this.feishu.sendText(msg.chatId, "当前是只读接入，不能发 prompt。用 /attach");
+        return;
+      }
+      if (collab.guest.snapshot().status !== "live") {
+        await this.feishu.sendText(msg.chatId, "主机还没就绪，稍后再发。");
+        return;
+      }
+      collab.guest.sendPrompt(text);
+      return;
+    }
+
+    const rpc = await this.ensureRpc(msg.chatId);
+    const ui = rpc.session.snapshot().uiRequest;
+    if (ui) {
+      rpc.session.sendUiResponse(ui.reqId, text);
+      return;
+    }
+    try {
+      await rpc.session.prompt(text);
+    } catch (err) {
       await this.feishu.sendText(
         msg.chatId,
-        "还没接入会话。先发 /list，再 /attach 1",
+        `prompt 失败：${err instanceof Error ? err.message : String(err)}`,
       );
-      return;
     }
-    if (bound.access !== "control") {
-      await this.feishu.sendText(msg.chatId, "当前是只读接入，不能发 prompt。用 /attach");
-      return;
-    }
-    if (bound.guest.snapshot().status !== "live") {
-      await this.feishu.sendText(msg.chatId, "主机还没就绪，稍后再发。");
-      return;
-    }
-    bound.guest.sendPrompt(text);
   }
 
   async onAction(action: CardAction): Promise<void> {
@@ -96,12 +129,16 @@ export class Bridge {
         await this.dispatch(fake, "abort", "");
         break;
       case "ui": {
-        const bound = this.bindings.get(action.chatId);
         const reqId = action.payload.reqId;
         const value = action.payload.value;
-        if (bound && reqId && value !== undefined) {
-          bound.guest.sendUiResponse(reqId, value);
+        if (!reqId || value === undefined) break;
+        const collab = this.collab.get(action.chatId);
+        if (collab) {
+          collab.guest.sendUiResponse(reqId, value);
+          break;
         }
+        const rpc = this.rpc.get(action.chatId);
+        rpc?.session.sendUiResponse(reqId, value);
         break;
       }
       default:
@@ -119,7 +156,6 @@ export class Bridge {
         await this.feishu.sendText(msg.chatId, HELP_TEXT);
         break;
       case "list":
-      case "sessions":
         await this.sendHostList(msg);
         break;
       case "attach":
@@ -129,20 +165,30 @@ export class Bridge {
         await this.attach(msg, arg, "view");
         break;
       case "leave":
-        await this.leave(msg.chatId, true);
+        await this.leaveCollab(msg.chatId, true);
         break;
-      case "abort":
-      case "stop": {
-        const bound = this.bindings.get(msg.chatId);
-        if (!bound) {
-          await this.feishu.sendText(msg.chatId, "没有接入中的会话。");
+      case "new":
+        await this.newRpc(msg.chatId);
+        break;
+      case "cwd":
+        await this.setCwd(msg, arg);
+        break;
+      case "abort": {
+        const collab = this.collab.get(msg.chatId);
+        if (collab) {
+          if (collab.access !== "control") {
+            await this.feishu.sendText(msg.chatId, "只读接入不能打断。");
+            break;
+          }
+          collab.guest.sendAbort();
           break;
         }
-        if (bound.access !== "control") {
-          await this.feishu.sendText(msg.chatId, "只读接入不能打断。");
+        const rpc = this.rpc.get(msg.chatId);
+        if (!rpc) {
+          await this.feishu.sendText(msg.chatId, "没有进行中的会话。");
           break;
         }
-        bound.guest.sendAbort();
+        rpc.session.abort();
         break;
       }
       case "status":
@@ -153,6 +199,7 @@ export class Bridge {
         break;
     }
   }
+
   private async sendHostList(msg: IncomingMessage): Promise<void> {
     try {
       const hosts = await listCollabHosts(this.config.ompBin);
@@ -179,7 +226,7 @@ export class Bridge {
       if (hosts.length === 0) {
         await this.feishu.sendText(
           msg.chatId,
-          "本机没有 live collab。在 omp 里执行 /collab。",
+          "本机没有 live collab。在 omp 里执行 /collab。不挂的话直接发文字走飞书自己的 omp。",
         );
         return;
       }
@@ -192,19 +239,25 @@ export class Bridge {
         await this.sendHostList(msg);
         return;
       }
-      if (access === "control" && host.access === "view") {
-        access = "view";
-      }
+      if (access === "control" && host.access === "view") access = "view";
       const link = await fetchCollabLink(
         host.instanceId,
         access,
         this.config.ompBin,
       );
-      await this.leave(msg.chatId, false);
+      await this.leaveCollab(msg.chatId, false);
       const guest = connectGuest(link.url, this.config.displayName);
-      const binding: Binding = { host, access, guest };
-      this.bindings.set(msg.chatId, binding);
-      guest.subscribe((snap) => this.queueCard(msg.chatId, binding, snap));
+      const binding: CollabBinding = { kind: "collab", host, access, guest };
+      this.collab.set(msg.chatId, binding);
+      guest.subscribe((snap) =>
+        this.queueCard(
+          msg.chatId,
+          binding,
+          snap,
+          true,
+          host.sessionName || host.instanceId.slice(0, 8),
+        ),
+      );
     } catch (err) {
       await this.feishu.sendText(
         msg.chatId,
@@ -213,33 +266,108 @@ export class Bridge {
     }
   }
 
-  private async leave(chatId: string, notify: boolean): Promise<void> {
-    const bound = this.bindings.get(chatId);
+  private async leaveCollab(chatId: string, notify: boolean): Promise<void> {
+    const bound = this.collab.get(chatId);
     if (!bound) {
-      if (notify) await this.feishu.sendText(chatId, "当前没有接入。");
+      if (notify) await this.feishu.sendText(chatId, "当前就是飞书自己的 omp 会话。");
       return;
     }
-    this.bindings.delete(chatId);
+    this.collab.delete(chatId);
     clearTimeout(bound.timer);
     bound.guest.close();
-    if (notify) await this.feishu.sendText(chatId, "已离开 omp 会话。");
+    if (notify) await this.feishu.sendText(chatId, "已离开 collab，回到飞书 omp。");
+  }
+
+  private async newRpc(chatId: string): Promise<void> {
+    const rpc = await this.ensureRpc(chatId);
+    await rpc.session.newSession();
+    await this.persistRpc(chatId, rpc);
+    await this.feishu.sendText(chatId, "已开新的 omp 会话。");
+  }
+
+  private async setCwd(msg: IncomingMessage, arg: string): Promise<void> {
+    if (!arg) {
+      const rec = await this.store.get(msg.chatId);
+      await this.feishu.sendText(
+        msg.chatId,
+        `当前目录：${rec?.cwd ?? this.config.cwd}`,
+      );
+      return;
+    }
+    const cwd = resolve(arg);
+    const old = this.rpc.get(msg.chatId);
+    if (old) {
+      this.rpc.delete(msg.chatId);
+      clearTimeout(old.timer);
+      await old.session.dispose();
+    }
+    await this.store.set(msg.chatId, { cwd });
+    await this.ensureRpc(msg.chatId);
+    await this.feishu.sendText(msg.chatId, `工作目录：${cwd}`);
   }
 
   private async status(chatId: string): Promise<void> {
-    const bound = this.bindings.get(chatId);
-    if (!bound) {
-      await this.feishu.sendText(chatId, "当前没有接入。发 /list");
+    const collab = this.collab.get(chatId);
+    if (collab) {
+      await this.feishu.sendCard(
+        chatId,
+        formatSnapshot(
+          collab.guest.snapshot(),
+          collab.host.sessionName || collab.host.instanceId.slice(0, 8),
+        ),
+      );
       return;
     }
-    const snap = bound.guest.snapshot();
+    const rpc = this.rpc.get(chatId);
+    if (!rpc) {
+      await this.feishu.sendText(
+        chatId,
+        `还没开 omp。直接发文字会在 ${this.config.cwd} 起会话。`,
+      );
+      return;
+    }
     await this.feishu.sendCard(
       chatId,
-      formatSnapshot(snap, hostLabel(bound.host)),
+      formatSnapshot(rpc.session.snapshot(), "omp", { showLeave: false }),
     );
   }
 
-  private queueCard(chatId: string, binding: Binding, snap: GuestSnapshot): void {
-    const view = formatSnapshot(snap, hostLabel(binding.host));
+  private async ensureRpc(chatId: string): Promise<RpcBinding> {
+    const existing = this.rpc.get(chatId);
+    if (existing && existing.session.snapshot().status !== "ended") {
+      return existing;
+    }
+    const rec = await this.store.get(chatId);
+    const cwd = rec?.cwd ?? this.config.cwd;
+    const session = await RpcSession.start({
+      ompBin: this.config.ompBin,
+      cwd,
+      sessionFile: rec?.sessionFile,
+    });
+    const binding: RpcBinding = { kind: "rpc", session };
+    this.rpc.set(chatId, binding);
+    session.subscribe((snap) =>
+      this.queueCard(chatId, binding, snap, false, "omp"),
+    );
+    await this.persistRpc(chatId, binding);
+    return binding;
+  }
+
+  private async persistRpc(chatId: string, binding: RpcBinding): Promise<void> {
+    await this.store.set(chatId, {
+      cwd: binding.session.getCwd(),
+      sessionFile: binding.session.getSessionFile(),
+    });
+  }
+
+  private queueCard(
+    chatId: string,
+    binding: CardPump,
+    snap: GuestSnapshot,
+    showLeave: boolean,
+    label: string,
+  ): void {
+    const view = formatSnapshot(snap, label, { showLeave });
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     if (key === binding.lastKey) return;
     binding.pending = view;
@@ -255,7 +383,7 @@ export class Bridge {
 
   private async flushCard(
     chatId: string,
-    binding: Binding,
+    binding: CardPump,
     view: CardView,
   ): Promise<void> {
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
@@ -269,10 +397,6 @@ export class Bridge {
   }
 }
 
-function hostLabel(host: CollabHost): string {
-  return host.sessionName || host.sessionId || host.instanceId.slice(0, 8);
-}
-
 function parseCommand(
   text: string,
 ): { name: string; arg: string } | undefined {
@@ -280,7 +404,7 @@ function parseCommand(
   if (!trimmed.startsWith("/")) return undefined;
   const body = trimmed.slice(1).trim();
   const space = body.search(/\s/);
-  const name = (space === -1 ? body : body.slice(0, space)).toLowerCase();
+  const raw = (space === -1 ? body : body.slice(0, space)).toLowerCase();
   const arg = space === -1 ? "" : body.slice(space).trim();
   const aliases: Record<string, string> = {
     help: "help",
@@ -298,8 +422,9 @@ function parseCommand(
     打断: "abort",
     status: "status",
     状态: "status",
+    new: "new",
+    新开: "new",
+    cwd: "cwd",
   };
-  const mapped = aliases[name];
-  if (!mapped) return { name, arg };
-  return { name: mapped, arg };
+  return { name: aliases[raw] ?? raw, arg };
 }
