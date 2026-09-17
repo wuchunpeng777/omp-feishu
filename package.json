@@ -1,0 +1,19 @@
+{
+  "name": "omp-feishu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "飞书挂载本机 omp collab 会话：列表、接入、看完整流程、发 prompt",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "list": "bun src/index.ts list",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.55.0"
+  }
+}
