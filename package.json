@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "飞书对话直接用 omp，也可挂本机 collab 会话看完整流程",
+  "description": "飞书里用 omp：流式卡片、切模型/思考、后台常驻，也可挂本机 TUI",
   "scripts": {
     "start": "bun src/index.ts",
+    "up": "bun src/index.ts up",
+    "down": "bun src/index.ts down",
+    "running": "bun src/index.ts running",
     "dev": "bun --watch src/index.ts",
     "list": "bun src/index.ts list",
     "test": "bun test"

@@ -48,10 +48,11 @@ export function loadBotConfig(): AppConfig {
   };
 }
 
-export function loadOmpConfig(): Pick<AppConfig, "ompBin" | "displayName" | "cwd"> {
+export function loadOmpConfig(): Pick<AppConfig, "ompBin" | "displayName" | "cwd" | "dataDir"> {
   return {
     ompBin: optional("OMP_BIN", "omp"),
     displayName: optional("OMP_DISPLAY_NAME", "飞书"),
     cwd: optional("OMP_CWD", process.cwd()),
+    dataDir: optional("OMP_FEISHU_DATA", join(homedir(), ".omp-feishu")),
   };
 }

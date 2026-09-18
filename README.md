@@ -1,8 +1,8 @@
 # omp-feishu
 
-飞书里直接对话就能用 omp，也能挂到**本机正在跑的 omp TUI**。
+飞书里直接对话就能用 omp：卡片上流式看过程，可切模型和思考强度；也能挂到**本机正在跑的 omp TUI**。
 
-- **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上**流式**看输出 / 工具 / 子代理（CardKit 打字机，飞书客户端 ≥ 7.20）。
+- **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上**流式**看输出 / 工具 / 子代理（CardKit 打字机，飞书客户端 ≥ 7.20）。`/model` `/think` 切模型和思考。`bun run up` 后台常驻，关终端不掉线。
 - **B**：`/list` → `/attach 1` 接到已经 `/collab` 的 TUI。同一套卡片。
 
 飞书只是遥控和流程窗口，不经过公网 URL。
@@ -55,8 +55,13 @@ OMP_FEISHU_DATA=~/.omp-feishu  # 飞书 chat → 会话文件映射
 ## 跑
 
 ```bash
-bun start
+bun start          # 前台，关终端就停
+bun run up         # 后台，关终端还在
+bun run down       # 停后台
+bun run running    # 看是否在跑
 ```
+
+日志：`~/.omp-feishu/bot.log`（可用 `OMP_FEISHU_DATA` 改目录）。
 
 飞书命令：
 
@@ -65,6 +70,8 @@ bun start
 | 普通文字 | A：发给这条对话的 `omp --mode rpc`；若已 `/attach` 则发给 TUI |
 | `/new` | A 新开会话 |
 | `/cwd [目录]` | A 查看 / 换工作目录 |
+| `/model [名称]` | A 列出 / 切换模型（模糊匹配，也可点卡片按钮） |
+| `/think [档位]` | A 查看 / 设置思考强度：off, minimal, low, medium, high, xhigh, max, auto |
 | `/list` | 列出本机 live collab |
 | `/attach 1` | 按序号 / pid / instanceId 接入 TUI（可写） |
 | `/view 1` | 只读接入 TUI |
@@ -73,7 +80,7 @@ bun start
 | `/status` | 当前绑定 |
 | `/help` | 帮助 |
 
-卡片按钮：打断、离开（仅 B）、回答主机 `ask`。
+卡片按钮：打断、离开（仅 B）、回答主机 `ask`。A 空闲时还有「模型」「思考」。
 
 每条飞书对话记住自己的 omp 会话文件（`~/.omp-feishu/chats.json`），下次还是接着聊。
 

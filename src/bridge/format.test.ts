@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatSnapshot } from "./format.ts";
+import { formatModelList, formatSnapshot, formatThinkCard } from "./format.ts";
 import type { GuestSnapshot } from "../collab/types.ts";
 
 function snap(partial: Partial<GuestSnapshot> = {}): GuestSnapshot {
@@ -81,4 +81,47 @@ test("过程区留下已完成工具和进行中输出", () => {
   expect(view.markdown).toContain("进行中 `read` a.txt");
   expect(view.markdown).toContain("hello world");
   expect(view.markdown).toContain("explore 40%");
+});
+
+test("RPC 空闲卡片有模型和思考按钮", () => {
+  const view = formatSnapshot(snap(), "omp", {
+    showLeave: false,
+    showModelControls: true,
+  });
+  expect(view.buttons.map((b) => b.action)).toEqual(["abort", "models", "think"]);
+});
+
+test("运行中不露模型和思考按钮", () => {
+  const view = formatSnapshot(
+    snap({ state: { isStreaming: true, model: { provider: "x", id: "y" } } }),
+    "omp",
+    { showLeave: false, showModelControls: true },
+  );
+  expect(view.buttons.map((b) => b.action)).toEqual(["abort"]);
+});
+
+test("模型列表按钮带 provider 和 id", () => {
+  const view = formatModelList(
+    [
+      { provider: "xai", id: "grok-4.6" },
+      { provider: "anthropic", id: "claude-opus-4" },
+    ],
+    { provider: "xai", id: "grok-4.6" },
+  );
+  expect(view.markdown).toContain("xai/grok-4.6");
+  expect(view.markdown).toContain("当前");
+  expect(view.buttons[0]).toMatchObject({
+    action: "set_model",
+    type: "primary",
+    payload: { provider: "xai", modelId: "grok-4.6" },
+  });
+});
+
+test("思考卡片当前档为 primary", () => {
+  const view = formatThinkCard("high");
+  expect(view.markdown).toContain("high");
+  const high = view.buttons.find((b) => b.text === "high");
+  expect(high?.action).toBe("set_think");
+  expect(high?.type).toBe("primary");
+  expect(high?.payload).toEqual({ level: "high" });
 });

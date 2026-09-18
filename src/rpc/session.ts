@@ -123,6 +123,41 @@ export class RpcSession {
     this.client.send({ type: "abort" });
   }
 
+  async listModels(): Promise<RpcModel[]> {
+    const res = await this.client.request({ type: "get_available_models" }, 45_000);
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const models = Array.isArray(data.models) ? data.models : [];
+    const out: RpcModel[] = [];
+    for (const item of models) {
+      const model = asRpcModel(item);
+      if (model) out.push(model);
+    }
+    return out;
+  }
+
+  async setModel(provider: string, modelId: string): Promise<RpcModel> {
+    const res = await this.client.request({
+      type: "set_model",
+      provider,
+      modelId,
+    });
+    const model = asRpcModel(res.data) ?? { provider, id: modelId };
+    this.state = { ...this.state, model };
+    this.emit();
+    await this.refreshState();
+    this.emit();
+    return asRpcModel(this.state?.model) ?? model;
+  }
+
+  async setThinkingLevel(level: string): Promise<void> {
+    await this.client.request({ type: "set_thinking_level", level });
+    this.state = { ...this.state, thinkingLevel: level };
+    this.emit();
+    await this.refreshState();
+    if (level === "auto") this.state = { ...this.state, thinkingLevel: "auto" };
+    this.emit();
+  }
+
   async newSession(): Promise<void> {
     await this.client.request({ type: "new_session" });
     this.entries = [];
@@ -213,22 +248,8 @@ export class RpcSession {
       /* 旧 runtime 可能没有分页接口 */
     }
   }
-
   private applyState(data: Record<string, unknown>): void {
-    const modelRaw = data.model;
-    const model =
-      modelRaw && typeof modelRaw === "object"
-        ? {
-            provider:
-              "provider" in modelRaw && typeof modelRaw.provider === "string"
-                ? modelRaw.provider
-                : undefined,
-            id:
-              "id" in modelRaw && typeof modelRaw.id === "string"
-                ? modelRaw.id
-                : undefined,
-          }
-        : undefined;
+    const model = asRpcModel(data.model) ?? this.state?.model;
     const usageRaw = data.contextUsage;
     const usage =
       usageRaw && typeof usageRaw === "object"
@@ -260,7 +281,7 @@ export class RpcSession {
     this.state = {
       ...this.state,
       isStreaming: data.isStreaming === true,
-      model: model ?? this.state?.model,
+      model,
       thinkingLevel:
         typeof data.thinkingLevel === "string"
           ? data.thinkingLevel
@@ -407,18 +428,20 @@ export class RpcSession {
           message: String(frame.output ?? frame.message ?? ""),
         });
         break;
-      case "model_changed":
-        if (frame.model && typeof frame.model === "object") {
-          const model = frame.model;
-          const provider =
-            "provider" in model && typeof model.provider === "string"
-              ? model.provider
-              : undefined;
-          const id =
-            "id" in model && typeof model.id === "string" ? model.id : undefined;
-          this.state = { ...this.state, model: { provider, id } };
-        }
+      case "model_changed": {
+        const model = asRpcModel(frame.model);
+        if (model) this.state = { ...this.state, model };
         break;
+      }
+      case "thinking_level_changed": {
+        const configured =
+          typeof frame.configured === "string" ? frame.configured : undefined;
+        const level =
+          typeof frame.thinkingLevel === "string" ? frame.thinkingLevel : undefined;
+        const thinkingLevel = configured ?? level;
+        if (thinkingLevel) this.state = { ...this.state, thinkingLevel };
+        break;
+      }
       default:
         break;
     }
@@ -451,6 +474,23 @@ export class RpcSession {
     const snap = this.snapshot();
     for (const listener of this.listeners) listener(snap);
   }
+}
+
+export type RpcModel = {
+  provider: string;
+  id: string;
+  name?: string;
+};
+
+function asRpcModel(value: unknown): RpcModel | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.provider !== "string" || typeof rec.id !== "string") return undefined;
+  return {
+    provider: rec.provider,
+    id: rec.id,
+    name: typeof rec.name === "string" ? rec.name : undefined,
+  };
 }
 
 function asAgentMessage(value: unknown): AgentMessage | undefined {

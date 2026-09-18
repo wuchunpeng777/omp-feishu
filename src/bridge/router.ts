@@ -16,10 +16,13 @@ import { RpcSession } from "../rpc/session.ts";
 import { ChatStore, storePath } from "../rpc/store.ts";
 import {
   formatHostList,
+  formatModelList,
   formatSnapshot,
+  formatThinkCard,
   HELP_TEXT,
   type CardView,
 } from "./format.ts";
+import { matchModels, parseThinkLevel } from "./select.ts";
 
 type CardPump = {
   live?: LiveCard;
@@ -160,6 +163,22 @@ export class Bridge {
       case "abort":
         await this.dispatch(fake, "abort", "");
         break;
+      case "models":
+        await this.dispatch(fake, "model", "");
+        break;
+      case "think":
+        await this.dispatch(fake, "think", "");
+        break;
+      case "set_model":
+        await this.applyModel(
+          action.chatId,
+          action.payload.provider ?? "",
+          action.payload.modelId ?? "",
+        );
+        break;
+      case "set_think":
+        await this.applyThink(action.chatId, action.payload.level ?? "");
+        break;
       case "ui": {
         const reqId = action.payload.reqId;
         const value = action.payload.value;
@@ -204,6 +223,12 @@ export class Bridge {
         break;
       case "cwd":
         await this.setCwd(msg, arg);
+        break;
+      case "model":
+        await this.setModelCommand(msg, arg);
+        break;
+      case "think":
+        await this.setThinkCommand(msg, arg);
         break;
       case "abort": {
         const collab = this.collab.get(msg.chatId);
@@ -343,7 +368,6 @@ export class Bridge {
     await this.ensureRpc(msg.chatId);
     await this.feishu.sendText(msg.chatId, `工作目录：${cwd}`);
   }
-
   private async status(chatId: string): Promise<void> {
     const collab = this.collab.get(chatId);
     if (collab) {
@@ -366,8 +390,134 @@ export class Bridge {
     }
     await this.feishu.sendCard(
       chatId,
-      formatSnapshot(rpc.session.snapshot(), "omp", { showLeave: false }),
+      formatSnapshot(rpc.session.snapshot(), "omp", {
+        showLeave: false,
+        showModelControls: true,
+      }),
     );
+  }
+
+  private async rpcOrExplain(chatId: string): Promise<RpcBinding | undefined> {
+    if (this.collab.has(chatId)) {
+      await this.feishu.sendText(
+        chatId,
+        "接入 TUI 时请在主机上切模型和思考。/leave 后可用 /model /think。",
+      );
+      return undefined;
+    }
+    return this.ensureRpc(chatId);
+  }
+
+  private currentModel(rpc: RpcBinding) {
+    const model = rpc.session.snapshot().state?.model;
+    if (!model || typeof model === "string" || !model.provider || !model.id) {
+      return undefined;
+    }
+    return { provider: model.provider, id: model.id, name: model.name };
+  }
+
+  private async sendView(msg: IncomingMessage, view: CardView): Promise<void> {
+    const id = msg.messageId
+      ? await this.feishu.replyCard(msg.messageId, view)
+      : undefined;
+    if (!id) await this.feishu.sendCard(msg.chatId, view);
+  }
+
+  private async setModelCommand(msg: IncomingMessage, arg: string): Promise<void> {
+    const rpc = await this.rpcOrExplain(msg.chatId);
+    if (!rpc) return;
+    try {
+      const models = await rpc.session.listModels();
+      const current = this.currentModel(rpc);
+      if (!arg.trim()) {
+        await this.sendView(msg, formatModelList(models, current));
+        return;
+      }
+      const hits = matchModels(models, arg);
+      if (hits.length === 0) {
+        await this.feishu.sendText(
+          msg.chatId,
+          `没有匹配「${arg}」的模型。发 /model 看列表。`,
+        );
+        return;
+      }
+      if (hits.length > 1) {
+        await this.sendView(msg, formatModelList(hits, current, arg));
+        return;
+      }
+      await this.applyModel(msg.chatId, hits[0].provider, hits[0].id, rpc);
+    } catch (err) {
+      await this.feishu.sendText(
+        msg.chatId,
+        `列/切模型失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async applyModel(
+    chatId: string,
+    provider: string,
+    modelId: string,
+    existing?: RpcBinding,
+  ): Promise<void> {
+    if (!provider || !modelId) return;
+    const rpc = existing ?? (await this.rpcOrExplain(chatId));
+    if (!rpc) return;
+    try {
+      const model = await rpc.session.setModel(provider, modelId);
+      await this.feishu.sendText(chatId, `模型：${model.provider}/${model.id}`);
+    } catch (err) {
+      await this.feishu.sendText(
+        chatId,
+        `切换模型失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async setThinkCommand(msg: IncomingMessage, arg: string): Promise<void> {
+    const rpc = await this.rpcOrExplain(msg.chatId);
+    if (!rpc) return;
+    if (!arg.trim()) {
+      await this.sendView(
+        msg,
+        formatThinkCard(rpc.session.snapshot().state?.thinkingLevel),
+      );
+      return;
+    }
+    const level = parseThinkLevel(arg);
+    if (!level) {
+      await this.sendView(
+        msg,
+        formatThinkCard(rpc.session.snapshot().state?.thinkingLevel),
+      );
+      await this.feishu.sendText(
+        msg.chatId,
+        `未知思考强度「${arg}」。用 off / low / medium / high / max / auto。`,
+      );
+      return;
+    }
+    await this.applyThink(msg.chatId, level, rpc);
+  }
+
+  private async applyThink(
+    chatId: string,
+    level: string,
+    existing?: RpcBinding,
+  ): Promise<void> {
+    const parsed = parseThinkLevel(level);
+    if (!parsed) return;
+    const rpc = existing ?? (await this.rpcOrExplain(chatId));
+    if (!rpc) return;
+    try {
+      await rpc.session.setThinkingLevel(parsed);
+      const now = rpc.session.snapshot().state?.thinkingLevel ?? parsed;
+      await this.feishu.sendText(chatId, `思考强度：${now}`);
+    } catch (err) {
+      await this.feishu.sendText(
+        chatId,
+        `设置思考失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async ensureRpc(chatId: string): Promise<RpcBinding> {
@@ -405,7 +555,10 @@ export class Bridge {
     showLeave: boolean,
     label: string,
   ): void {
-    const view = formatSnapshot(snap, label, { showLeave });
+    const view = formatSnapshot(snap, label, {
+      showLeave,
+      showModelControls: !showLeave,
+    });
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     if (key === binding.lastKey) return;
     binding.pending = view;
@@ -473,6 +626,11 @@ function parseCommand(
     new: "new",
     新开: "new",
     cwd: "cwd",
+    model: "model",
+    模型: "model",
+    think: "think",
+    thinking: "think",
+    思考: "think",
   };
   return { name: aliases[raw] ?? raw, arg };
 }

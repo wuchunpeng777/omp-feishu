@@ -10,6 +10,7 @@ import {
   type CollabAccess,
 } from "./collab/hosts.ts";
 import { loadBotConfig, loadOmpConfig } from "./config.ts";
+import { daemonDown, daemonStatus, daemonUp } from "./daemon.ts";
 import { createFeishu } from "./feishu/bot.ts";
 import { RpcSession } from "./rpc/session.ts";
 
@@ -103,11 +104,18 @@ if (command === "list") {
   } finally {
     await session.dispose();
   }
+} else if (command === "up") {
+  await daemonUp(import.meta.path);
+} else if (command === "down") {
+  await daemonDown();
+} else if (command === "running") {
+  await daemonStatus();
 } else {
   const config = loadBotConfig();
   const feishu = createFeishu(config);
   const bridge = new Bridge(config, feishu);
   console.log(`omp-feishu 长连接已启动（${config.domain}）`);
+  console.log("前台进程，关终端会停。后台：bun run up");
   await feishu.start(
     (msg) => bridge.onMessage(msg),
     (action) => bridge.onAction(action),

@@ -1,6 +1,11 @@
 /** 把 collab 快照压成飞书卡片可读的流程摘要。 */
 
 import type { AgentMessage, GuestSnapshot, SessionEntry } from "../collab/types.ts";
+import {
+  modelRef,
+  THINK_LEVELS,
+  type ModelPick,
+} from "./select.ts";
 
 export type CardButton = {
   text: string;
@@ -15,6 +20,11 @@ export type CardView = {
   markdown: string;
   buttons: CardButton[];
   streaming?: boolean;
+};
+
+export type FormatSnapshotOpts = {
+  showLeave?: boolean;
+  showModelControls?: boolean;
 };
 
 const MAX_MD = 3500;
@@ -92,7 +102,7 @@ function brief(value: unknown, max: number): string {
 export function formatSnapshot(
   snap: GuestSnapshot,
   hostLabel: string,
-  opts?: { showLeave?: boolean },
+  opts?: FormatSnapshotOpts,
 ): CardView {
   const streaming = snap.state?.isStreaming === true;
   const status = snap.error
@@ -211,6 +221,10 @@ export function formatSnapshot(
   if (!snap.readOnly && snap.status === "live") {
     buttons.push({ text: "打断", action: "abort", type: "danger" });
   }
+  if (opts?.showModelControls && !snap.readOnly && snap.status === "live" && !streaming) {
+    buttons.push({ text: "模型", action: "models", type: "default" });
+    buttons.push({ text: "思考", action: "think", type: "default" });
+  }
   if (opts?.showLeave !== false) {
     buttons.push({ text: "离开", action: "leave", type: "default" });
   }
@@ -276,12 +290,70 @@ export function formatHostList(
   };
 }
 
+export function formatModelList(
+  models: ModelPick[],
+  current?: ModelPick | string,
+  query?: string,
+): CardView {
+  const currentRef =
+    typeof current === "string"
+      ? current
+      : current
+        ? modelRef(current)
+        : "";
+  const shown = models.slice(0, 40);
+  const lines =
+    shown.length === 0
+      ? ["没有匹配的模型。换个关键词，或发 `/model` 看全部。"]
+      : shown.map((model, i) => {
+          const ref = modelRef(model);
+          const mark = ref === currentRef ? " · 当前" : "";
+          const name = model.name && model.name !== model.id ? ` ${model.name}` : "";
+          return `**#${i + 1}** \`${ref}\`${name}${mark}`;
+        });
+  if (models.length > shown.length) {
+    lines.push(`\n还有 ${models.length - shown.length} 个。发 \`/model 关键词\` 缩小。`);
+  }
+  const q = query?.trim();
+  return {
+    title: q ? `模型 · ${truncate(q, 16)} ${models.length}` : `模型 ${models.length}`,
+    template: "indigo",
+    markdown: truncate(
+      [`当前 \`${currentRef || "未知"}\``, "", ...lines].join("\n"),
+      MAX_MD,
+    ),
+    buttons: shown.slice(0, 6).map((model, i) => ({
+      text: truncate(`#${i + 1} ${model.id}`, 20),
+      action: "set_model",
+      type: modelRef(model) === currentRef ? "primary" : "default",
+      payload: { provider: model.provider, modelId: model.id },
+    })),
+  };
+}
+
+export function formatThinkCard(current?: string): CardView {
+  const now = (current ?? "").trim() || "未知";
+  return {
+    title: `思考 · ${now}`,
+    template: "indigo",
+    markdown: `当前 **${now}**\n\n点按钮，或发 \`/think high\`。可用：${THINK_LEVELS.join(" / ")}`,
+    buttons: THINK_LEVELS.map((level) => ({
+      text: level,
+      action: "set_think",
+      type: level === now ? "primary" : "default",
+      payload: { level },
+    })),
+  };
+}
+
 export const HELP_TEXT = `飞书里直接用 omp（A），也可以挂本机 TUI（B）。
 
 **A · 飞书会话**
 - 直接发文字：开/续这条对话的 \`omp --mode rpc\`
 - \`/new\` 新开会话
 - \`/cwd <目录>\` 换工作目录
+- \`/model [名称]\` 查看 / 切换模型
+- \`/think [off|low|medium|high|max|auto]\` 思考强度
 - \`/abort\` 打断
 
 **B · 挂已有 TUI**
