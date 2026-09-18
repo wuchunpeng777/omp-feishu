@@ -11,7 +11,7 @@ import {
 import { connectGuest, type CollabGuest } from "../collab/guest.ts";
 import type { GuestSnapshot } from "../collab/types.ts";
 import type { AppConfig } from "../config.ts";
-import type { CardAction, FeishuApi, IncomingMessage } from "../feishu/bot.ts";
+import type { CardAction, FeishuApi, IncomingMessage, LiveCard } from "../feishu/bot.ts";
 import { RpcSession } from "../rpc/session.ts";
 import { ChatStore, storePath } from "../rpc/store.ts";
 import {
@@ -22,10 +22,11 @@ import {
 } from "./format.ts";
 
 type CardPump = {
-  cardMessageId?: string;
+  live?: LiveCard;
   lastKey?: string;
   timer?: ReturnType<typeof setTimeout>;
   pending?: CardView;
+  chain: Promise<void>;
 };
 
 type CollabBinding = CardPump & {
@@ -247,7 +248,13 @@ export class Bridge {
       );
       await this.leaveCollab(msg.chatId, false);
       const guest = connectGuest(link.url, this.config.displayName);
-      const binding: CollabBinding = { kind: "collab", host, access, guest };
+      const binding: CollabBinding = {
+        kind: "collab",
+        host,
+        access,
+        guest,
+        chain: Promise.resolve(),
+      };
       this.collab.set(msg.chatId, binding);
       guest.subscribe((snap) =>
         this.queueCard(
@@ -344,7 +351,7 @@ export class Bridge {
       cwd,
       sessionFile: rec?.sessionFile,
     });
-    const binding: RpcBinding = { kind: "rpc", session };
+    const binding: RpcBinding = { kind: "rpc", session, chain: Promise.resolve() };
     this.rpc.set(chatId, binding);
     session.subscribe((snap) =>
       this.queueCard(chatId, binding, snap, false, "omp"),
@@ -371,14 +378,28 @@ export class Bridge {
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     if (key === binding.lastKey) return;
     binding.pending = view;
+    const endStream = view.streaming !== true && binding.live?.streaming === true;
+    if (endStream && binding.timer) {
+      clearTimeout(binding.timer);
+      binding.timer = undefined;
+    }
     if (binding.timer) return;
+    const delay = endStream ? 0 : view.streaming ? 180 : 350;
     binding.timer = setTimeout(() => {
       binding.timer = undefined;
       const pending = binding.pending;
       binding.pending = undefined;
       if (!pending) return;
-      void this.flushCard(chatId, binding, pending);
-    }, 400);
+      this.scheduleFlush(chatId, binding, pending);
+    }, delay);
+  }
+
+  private scheduleFlush(chatId: string, binding: CardPump, view: CardView): void {
+    binding.chain = binding.chain
+      .then(() => this.flushCard(chatId, binding, view))
+      .catch((err) => {
+        console.error("刷新卡片失败", err);
+      });
   }
 
   private async flushCard(
@@ -388,13 +409,9 @@ export class Bridge {
   ): Promise<void> {
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     binding.lastKey = key;
-    if (binding.cardMessageId) {
-      const ok = await this.feishu.patchCard(binding.cardMessageId, view);
-      if (ok) return;
-      binding.cardMessageId = undefined;
-    }
-    binding.cardMessageId = await this.feishu.sendCard(chatId, view);
+    binding.live = await this.feishu.pushLiveCard(chatId, binding.live, view);
   }
+
 }
 
 function parseCommand(

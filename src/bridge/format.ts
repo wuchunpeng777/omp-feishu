@@ -14,6 +14,7 @@ export type CardView = {
   template: "blue" | "green" | "orange" | "red" | "grey" | "indigo";
   markdown: string;
   buttons: CardButton[];
+  streaming?: boolean;
 };
 
 const MAX_MD = 3500;
@@ -197,6 +198,7 @@ export function formatSnapshot(
     template,
     markdown: truncate(lines.join("\n"), MAX_MD),
     buttons,
+    streaming,
   };
 }
 

@@ -36,3 +36,15 @@ test("RPC 卡片不露离开", () => {
   expect(view.markdown).toContain("/tmp");
   expect(view.markdown).toContain("hi");
 });
+
+test("运行中卡片标记 streaming", () => {
+  const live = formatSnapshot(
+    snap({ state: { isStreaming: true, model: { provider: "x", id: "y" } } }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(live.streaming).toBe(true);
+  expect(live.template).toBe("orange");
+  const idle = formatSnapshot(snap(), "omp", { showLeave: false });
+  expect(idle.streaming).toBe(false);
+});

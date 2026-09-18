@@ -1,9 +1,29 @@
-/** 飞书消息卡片（schema 1.0，可 patch）。 */
+/** 飞书卡片：JSON 2.0（CardKit 流式）+ 1.0 回退。 */
 
 import type { CardButton, CardView } from "../bridge/format.ts";
 
+export const STREAM_MD_ID = "md_body";
+
+export function cardStructure(view: CardView): string {
+  const buttons = view.buttons
+    .map((button) => `${button.action}:${button.text}`)
+    .join(",");
+  return `${view.title}\n${view.template}\n${buttons}`;
+}
+
+/** 结构没变、正文是前缀加长、且仍在流式 → 走打字机，否则整卡覆盖。 */
+export function canTypewriter(
+  live: { streaming: boolean; structure: string; markdown: string },
+  view: CardView,
+): boolean {
+  if (!live.streaming || view.streaming !== true) return false;
+  if (cardStructure(view) !== live.structure) return false;
+  const next = view.markdown;
+  return next.length > live.markdown.length && next.startsWith(live.markdown);
+}
+
 export function buildCard(view: CardView): Record<string, unknown> {
-  const actions = view.buttons.map((button) => buttonElement(button));
+  const actions = view.buttons.map((button) => buttonElementV1(button));
   const elements: unknown[] = [
     {
       tag: "div",
@@ -23,19 +43,73 @@ export function buildCard(view: CardView): Record<string, unknown> {
   };
 }
 
-function buttonElement(button: CardButton): Record<string, unknown> {
+export function buildCardV2(view: CardView): Record<string, unknown> {
+  const streaming = view.streaming === true;
+  const elements: unknown[] = [
+    {
+      tag: "markdown",
+      content: view.markdown || "…",
+      element_id: STREAM_MD_ID,
+    },
+  ];
+  view.buttons.forEach((button, i) => {
+    elements.push(buttonElementV2(button, i));
+  });
+  return {
+    schema: "2.0",
+    config: {
+      update_multi: true,
+      streaming_mode: streaming,
+      summary: { content: view.title },
+      streaming_config: {
+        print_frequency_ms: { default: 70 },
+        print_step: { default: 2 },
+        print_strategy: "fast",
+      },
+    },
+    header: {
+      title: { tag: "plain_text", content: view.title },
+      template: view.template,
+    },
+    body: { elements },
+  };
+}
+
+function buttonValue(button: CardButton): Record<string, string> {
   const value: Record<string, string> = { action: button.action };
   if (button.payload) {
     for (const [k, v] of Object.entries(button.payload)) value[k] = v;
   }
+  return value;
+}
+
+function buttonElementV1(button: CardButton): Record<string, unknown> {
   return {
     tag: "button",
     text: { tag: "plain_text", content: button.text },
     type: button.type ?? "default",
-    value,
+    value: buttonValue(button),
+  };
+}
+
+function buttonElementV2(
+  button: CardButton,
+  index: number,
+): Record<string, unknown> {
+  const value = buttonValue(button);
+  return {
+    tag: "button",
+    element_id: `btn_${index}`,
+    text: { tag: "plain_text", content: button.text },
+    type: button.type ?? "default",
+    behaviors: [{ type: "callback", value }],
   };
 }
 
 export function cardContent(view: CardView): string {
   return JSON.stringify(buildCard(view));
+}
+
+export function cardContentV2(view: CardView): string {
+  return JSON.stringify(buildCardV2(view));
 }

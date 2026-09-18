@@ -2,7 +2,7 @@
 
 飞书里直接对话就能用 omp，也能挂到**本机正在跑的 omp TUI**。
 
-- **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上流式看输出 / 工具 / 子代理。
+- **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上**流式**看输出 / 工具 / 子代理（CardKit 打字机，飞书客户端 ≥ 7.20）。
 - **B**：`/list` → `/attach 1` 接到已经 `/collab` 的 TUI。同一套卡片。
 
 飞书只是遥控和流程窗口，不经过公网 URL。
@@ -31,11 +31,17 @@ cp .env.example .env
    - `im:message.p2p_msg:readonly`（收私聊）
    - `im:message.group_at_msg:readonly`（收群 @）
    - `im:resource`（发卡片）
-3. 事件订阅：选择 **使用长连接接收事件**（不用填公网 URL）。
+   - `cardkit:card:write`（JSON 2.0 流式卡片；没有的话会退回整卡 patch，看起来不像打字机）
+3. **事件订阅**（「事件与回调」→ **事件配置**）：选择 **使用长连接接收事件**（不用填公网 URL）。
    - `im.message.receive_v1`
-   - 卡片回传 `card.action.trigger`
-4. 发布版本，把机器人拉进私聊或群。
-5. 把 App ID / Secret 写入 `.env`。
+4. **回调配置**（同一页 → **回调配置**，和事件是两回事）：
+   - 先本机 `bun start`，长连接必须在线，否则保存会失败。
+   - 订阅方式选 **使用长连接接收回调**（不要选「将回调发送至开发者服务器」，也没有公网 URL 可填）。
+   - 已订阅的回调 → 添加回调 → **卡片回传交互** `card.action.trigger`（新版）。不要订旧版 `card.action.trigger_v1`，旧版不支持长连接。
+5. 发布版本，把机器人拉进私聊或群。
+6. 把 App ID / Secret 写入 `.env`。
+
+点卡片上的「接入 #N」若弹出「该应用尚未配置卡片回调」：不要点「立即配置」去填 HTTP 地址。按上面第 4 步在后台配长连接回调，再发一版即可。
 
 群里建议配 `FEISHU_ALLOW_OPEN_IDS`，否则谁 @ 都能驱动你这台机器。
 
@@ -89,7 +95,7 @@ bun src/index.ts prompt "只回 ping"
                └─ /attach B：collab guest（AES-256-GCM, proto 3）
                       │
                       ▼
-               本机执行工具，卡片 patch 流程
+               本机执行工具，CardKit 流式刷新卡片
 ```
 
 接入 B 走官方口子：`omp collab list --json` + `omp collab link`，guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。

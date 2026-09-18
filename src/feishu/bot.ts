@@ -1,9 +1,15 @@
-/** 飞书收发：长连接事件 + 卡片消息。 */
+/** 飞书收发：长连接事件 + CardKit 流式卡片。 */
 
 import * as Lark from "@larksuiteoapi/node-sdk";
 import type { AppConfig } from "../config.ts";
 import type { CardView } from "../bridge/format.ts";
-import { cardContent as encodeCard } from "./cards.ts";
+import {
+  canTypewriter,
+  cardContent as encodeCard,
+  cardContentV2,
+  cardStructure,
+  STREAM_MD_ID,
+} from "./cards.ts";
 
 export type IncomingMessage = {
   chatId: string;
@@ -21,6 +27,15 @@ export type CardAction = {
   payload: Record<string, string>;
 };
 
+export type LiveCard = {
+  cardId?: string;
+  messageId?: string;
+  sequence: number;
+  streaming: boolean;
+  markdown: string;
+  structure: string;
+};
+
 export type MessageHandler = (msg: IncomingMessage) => Promise<void> | void;
 export type ActionHandler = (action: CardAction) => Promise<void> | void;
 
@@ -28,9 +43,15 @@ export type FeishuApi = {
   sendCard: (chatId: string, view: CardView) => Promise<string | undefined>;
   replyCard: (messageId: string, view: CardView) => Promise<string | undefined>;
   patchCard: (messageId: string, view: CardView) => Promise<boolean>;
+  pushLiveCard: (
+    chatId: string,
+    live: LiveCard | undefined,
+    view: CardView,
+  ) => Promise<LiveCard>;
   sendText: (chatId: string, text: string) => Promise<void>;
   start: (onMessage: MessageHandler, onAction: ActionHandler) => Promise<void>;
 };
+
 function extractText(msgType: string, content: string): string {
   try {
     const parsed = JSON.parse(content) as {
@@ -57,6 +78,16 @@ function stripMentions(text: string): string {
   return text.replace(/@_user_\d+/g, "").replace(/@\S+/g, "").trim();
 }
 
+function kitFailed(res: { code?: number; msg?: string }, label: string): boolean {
+  if (!res.code) return false;
+  console.error(label, res.code, res.msg);
+  return true;
+}
+
+function kitDenied(res: { code?: number }): boolean {
+  return res.code === 300311 || res.code === 99991663;
+}
+
 export function createFeishu(config: AppConfig): FeishuApi {
   const domain =
     config.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
@@ -71,6 +102,7 @@ export function createFeishu(config: AppConfig): FeishuApi {
     domain,
     loggerLevel: Lark.LoggerLevel.info,
   });
+  let kitDisabled = false;
 
   async function sendCard(chatId: string, view: CardView): Promise<string | undefined> {
     const res = await client.im.v1.message.create({
@@ -130,6 +162,149 @@ export function createFeishu(config: AppConfig): FeishuApi {
     if (res.code !== 0) console.error("飞书发文本失败", res.code, res.msg);
   }
 
+  async function fallbackPatchOrSend(
+    chatId: string,
+    messageId: string | undefined,
+    view: CardView,
+  ): Promise<string | undefined> {
+    if (messageId && (await patchCard(messageId, view))) return messageId;
+    return sendCard(chatId, view);
+  }
+
+  function snapshot(view: CardView, extra: Partial<LiveCard>): LiveCard {
+    return {
+      sequence: 0,
+      streaming: view.streaming === true,
+      markdown: view.markdown,
+      structure: cardStructure(view),
+      ...extra,
+    };
+  }
+
+  async function createKitCard(view: CardView): Promise<string | undefined> {
+    const res = await client.cardkit.v1.card.create({
+      data: { type: "card_json", data: cardContentV2(view) },
+    });
+    if (kitDenied(res)) kitDisabled = true;
+    if (kitFailed(res, "CardKit 创建失败")) return undefined;
+    return res.data?.card_id;
+  }
+  async function sendKitCard(
+    chatId: string,
+    cardId: string,
+  ): Promise<string | undefined> {
+    const res = await client.im.v1.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify({ type: "card", data: { card_id: cardId } }),
+      },
+    });
+    if (res.code !== 0) {
+      console.error("飞书发送 CardKit 失败", res.code, res.msg);
+      return undefined;
+    }
+    return res.data?.message_id;
+  }
+
+  async function streamMarkdown(
+    cardId: string,
+    markdown: string,
+    sequence: number,
+  ): Promise<boolean> {
+    const res = await client.cardkit.v1.cardElement.content({
+      path: { card_id: cardId, element_id: STREAM_MD_ID },
+      data: { content: markdown || "…", sequence },
+    });
+    if (kitDenied(res)) kitDisabled = true;
+    return !kitFailed(res, "CardKit 流式失败");
+  }
+
+  async function updateKitCard(
+    cardId: string,
+    view: CardView,
+    sequence: number,
+  ): Promise<boolean> {
+    const res = await client.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: {
+        sequence,
+        card: { type: "card_json", data: cardContentV2(view) },
+      },
+    });
+    if (kitDenied(res)) kitDisabled = true;
+    return !kitFailed(res, "CardKit 全量更新失败");
+  }
+
+  async function setStreamingMode(
+    cardId: string,
+    streaming: boolean,
+    sequence: number,
+  ): Promise<boolean> {
+    const res = await client.cardkit.v1.card.settings({
+      path: { card_id: cardId },
+      data: {
+        sequence,
+        settings: JSON.stringify({ config: { streaming_mode: streaming } }),
+      },
+    });
+    if (kitDenied(res)) kitDisabled = true;
+    return !kitFailed(res, "CardKit 切换流式失败");
+  }
+
+  async function pushLiveCard(
+    chatId: string,
+    live: LiveCard | undefined,
+    view: CardView,
+  ): Promise<LiveCard> {
+    if (kitDisabled) {
+      const messageId = await fallbackPatchOrSend(chatId, live?.messageId, view);
+      return snapshot(view, { messageId, sequence: live?.sequence ?? 0 });
+    }
+
+    if (!live?.cardId) {
+      const cardId = await createKitCard(view);
+      if (!cardId) {
+        const messageId = await fallbackPatchOrSend(chatId, live?.messageId, view);
+        return snapshot(view, { messageId });
+      }
+      const messageId = await sendKitCard(chatId, cardId);
+      if (!messageId) {
+        const fallbackId = await fallbackPatchOrSend(chatId, live?.messageId, view);
+        return snapshot(view, { messageId: fallbackId });
+      }
+      return snapshot(view, { cardId, messageId, sequence: 1 });
+    }
+
+    let sequence = live.sequence;
+    if (canTypewriter(live, view)) {
+      sequence += 1;
+      if (await streamMarkdown(live.cardId, view.markdown, sequence)) {
+        return snapshot(view, {
+          cardId: live.cardId,
+          messageId: live.messageId,
+          sequence,
+        });
+      }
+    }
+    if (live.streaming !== (view.streaming === true)) {
+      sequence += 1;
+      await setStreamingMode(live.cardId, view.streaming === true, sequence);
+    }
+    sequence += 1;
+    if (await updateKitCard(live.cardId, view, sequence)) {
+      return snapshot(view, {
+        cardId: live.cardId,
+        messageId: live.messageId,
+        sequence,
+      });
+    }
+
+    const messageId = await fallbackPatchOrSend(chatId, live.messageId, view);
+    return snapshot(view, { messageId, sequence });
+  }
+
   function start(onMessage: MessageHandler, onAction: ActionHandler): Promise<void> {
     return wsClient.start({
       eventDispatcher: new Lark.EventDispatcher({}).register({
@@ -180,7 +355,5 @@ export function createFeishu(config: AppConfig): FeishuApi {
     });
   }
 
-  return { sendCard, replyCard, patchCard, sendText, start };
+  return { sendCard, replyCard, patchCard, pushLiveCard, sendText, start };
 }
-
-
