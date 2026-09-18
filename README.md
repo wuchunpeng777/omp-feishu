@@ -3,7 +3,7 @@
 飞书里直接对话就能用 omp：卡片上流式看过程，可切模型和思考强度；也能挂到**本机正在跑的 omp TUI**。
 
 - **A**：每条飞书对话懒启动 `omp --mode rpc`。工具在本机跑，卡片上**流式**看输出 / 工具 / 子代理（CardKit 打字机，飞书客户端 ≥ 7.20）。`/model` `/think` 切模型和思考。`bun run up` 后台常驻，关终端不掉线。
-- **B**：`/list` → `/attach 1` 接到已经 `/collab` 的 TUI。同一套卡片。
+- **B**：`/list` 列出本机正在跑的 TUI。已 `/collab` 的点「接入」；未分享的点「开启」会向该 TUI 发送 `/collab` 并自动加入。同一套卡片。
 
 飞书只是遥控和流程窗口，不经过公网 URL。
 
@@ -72,8 +72,8 @@ bun run running    # 看是否在跑
 | `/cwd [目录]` | A 查看 / 换工作目录 |
 | `/model [名称]` | A 列出 / 切换模型（模糊匹配，也可点卡片按钮） |
 | `/think [档位]` | A 查看 / 设置思考强度：off, minimal, low, medium, high, xhigh, max, auto |
-| `/list` | 列出本机 live collab |
-| `/attach 1` | 按序号 / pid / instanceId 接入 TUI（可写） |
+| `/list` | 列出本机正在跑的 TUI（含未开 collab 的） |
+| `/attach 1` | 按序号 / pid / instanceId 接入；未分享的会先开启 collab |
 | `/view 1` | 只读接入 TUI |
 | `/leave` | 离开 collab，回到 A |
 | `/abort` | 打断当前轮 |
@@ -105,4 +105,4 @@ bun src/index.ts prompt "只回 ping"
                本机执行工具，CardKit 流式刷新卡片
 ```
 
-接入 B 走官方口子：`omp collab list --json` + `omp collab link`，guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。
+接入 B：枚举本机 `omp.exe` TUI + `omp collab list --json`。未分享的向该 TUI 注入 `/collab`，再 `omp collab link`。guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。

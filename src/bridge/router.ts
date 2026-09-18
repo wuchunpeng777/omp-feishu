@@ -2,9 +2,10 @@
 
 import { resolve } from "node:path";
 import {
+  ensureCollabHost,
   fetchCollabLink,
-  listCollabHosts,
-  resolveHost,
+  listLiveConversations,
+  resolveConversation,
   type CollabAccess,
   type CollabHost,
 } from "../collab/hosts.ts";
@@ -158,7 +159,11 @@ export class Bridge {
     };
     switch (action.action) {
       case "attach":
-        await this.dispatch(fake, "attach", action.payload.instanceId ?? "");
+        await this.dispatch(
+          fake,
+          "attach",
+          action.payload.selector ?? action.payload.instanceId ?? action.payload.pid ?? "",
+        );
         break;
       case "leave":
         await this.dispatch(fake, "leave", "");
@@ -262,8 +267,8 @@ export class Bridge {
 
   private async sendHostList(msg: IncomingMessage): Promise<void> {
     try {
-      const hosts = await listCollabHosts(this.config.ompBin);
-      const view = formatHostList(hosts);
+      const conversations = await listLiveConversations(this.config.ompBin);
+      const view = formatHostList(conversations);
       const id = msg.messageId
         ? await this.feishu.replyCard(msg.messageId, view)
         : undefined;
@@ -271,7 +276,7 @@ export class Bridge {
     } catch (err) {
       await this.feishu.sendText(
         msg.chatId,
-        `列出 collab 失败：${err instanceof Error ? err.message : String(err)}`,
+        `列出会话失败：${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -282,23 +287,30 @@ export class Bridge {
     access: CollabAccess,
   ): Promise<void> {
     try {
-      const hosts = await listCollabHosts(this.config.ompBin);
-      if (hosts.length === 0) {
+      const conversations = await listLiveConversations(this.config.ompBin);
+      if (conversations.length === 0) {
         await this.feishu.sendText(
           msg.chatId,
-          "本机没有 live collab。在 omp 里执行 /collab。不挂的话直接发文字走飞书自己的 omp。",
+          "本机没有正在跑的 omp TUI。打开 omp 后再 /list。不挂的话直接发文字走飞书自己的 omp。",
         );
         return;
       }
-      const host = selector.trim()
-        ? resolveHost(hosts, selector)
-        : hosts.length === 1
-          ? hosts[0]
+      const conversation = selector.trim()
+        ? resolveConversation(conversations, selector)
+        : conversations.length === 1
+          ? conversations[0]
           : undefined;
-      if (!host) {
+      if (!conversation) {
         await this.sendHostList(msg);
         return;
       }
+      if (!conversation.sharing) {
+        await this.feishu.sendText(
+          msg.chatId,
+          `正在为 pid ${conversation.pid ?? "?"} 开启 collab…`,
+        );
+      }
+      const host = await ensureCollabHost(conversation, this.config.ompBin);
       if (access === "control" && host.access === "view") access = "view";
       const link = await fetchCollabLink(
         host.instanceId,

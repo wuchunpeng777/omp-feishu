@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatModelList, formatSnapshot, formatThinkCard } from "./format.ts";
+import { formatHostList, formatModelList, formatSnapshot, formatThinkCard } from "./format.ts";
 import type { GuestSnapshot } from "../collab/types.ts";
 
 function snap(partial: Partial<GuestSnapshot> = {}): GuestSnapshot {
@@ -124,4 +124,22 @@ test("思考卡片当前档为 primary", () => {
   expect(high?.action).toBe("set_think");
   expect(high?.type).toBe("primary");
   expect(high?.payload).toEqual({ level: "high" });
+});
+
+test("未分享 TUI 出开启按钮", () => {
+  const view = formatHostList([
+    { instanceId: "aaa", pid: 1, sessionName: "live", sharing: true },
+    { pid: 2, sessionName: "idle", sharing: false },
+  ]);
+  expect(view.title).toBe("本机 TUI 2");
+  expect(view.markdown).toContain("已分享");
+  expect(view.markdown).toContain("未分享");
+  expect(view.buttons.map((b) => b.text)).toEqual(["接入 #1", "开启 #2"]);
+  expect(view.buttons[1]?.payload).toEqual({ instanceId: "2", selector: "2" });
+});
+
+test("空列表提示打开 TUI", () => {
+  const view = formatHostList([]);
+  expect(view.title).toBe("没有本机 TUI");
+  expect(view.buttons).toEqual([]);
 });

@@ -4,9 +4,10 @@ import { Bridge } from "./bridge/router.ts";
 import { formatSnapshot } from "./bridge/format.ts";
 import { connectGuest } from "./collab/guest.ts";
 import {
+  ensureCollabHost,
   fetchCollabLink,
-  listCollabHosts,
-  resolveHost,
+  listLiveConversations,
+  resolveConversation,
   type CollabAccess,
 } from "./collab/hosts.ts";
 import { loadBotConfig, loadOmpConfig } from "./config.ts";
@@ -25,31 +26,38 @@ const command = args[0];
 
 if (command === "list") {
   const { ompBin } = loadOmpConfig();
-  const hosts = await listCollabHosts(ompBin);
-  if (hosts.length === 0) {
-    console.log("本机没有 live collab。在 omp TUI 执行 /collab。");
+  const conversations = await listLiveConversations(ompBin);
+  if (conversations.length === 0) {
+    console.log("本机没有正在跑的 omp TUI。");
     process.exit(0);
   }
-  for (const [i, host] of hosts.entries()) {
-    const name = host.sessionName || host.instanceId;
+  for (const [i, conv] of conversations.entries()) {
+    const name = conv.sessionName || conv.instanceId || `pid ${conv.pid ?? "?"}`;
+    const share = conv.sharing ? "已分享" : "未分享";
     console.log(
-      `#${i + 1}  pid=${host.pid ?? "-"}  ${name}  ${host.cwd ?? ""}  ${host.model ?? ""}  ${host.access ?? ""}`,
+      `#${i + 1}  pid=${conv.pid ?? "-"}  ${share}  ${name}  ${conv.cwd ?? ""}  ${conv.model ?? ""}  ${conv.access ?? ""}`,
     );
   }
 } else if (command === "attach") {
   const { ompBin, displayName } = loadOmpConfig();
   const selector = args[1];
   const access: CollabAccess = args.includes("--view") ? "view" : "control";
-  const hosts = await listCollabHosts(ompBin);
-  if (hosts.length === 0) {
-    console.error("本机没有 live collab");
+  const conversations = await listLiveConversations(ompBin);
+  if (conversations.length === 0) {
+    console.error("本机没有正在跑的 omp TUI");
     process.exit(1);
   }
-  const host = selector ? resolveHost(hosts, selector) : hosts[0];
-  if (!host) {
+  const conversation = selector
+    ? resolveConversation(conversations, selector)
+    : conversations[0];
+  if (!conversation) {
     console.error(`找不到会话：${selector}`);
     process.exit(1);
   }
+  if (!conversation.sharing) {
+    console.error(`正在为 pid ${conversation.pid ?? "?"} 开启 collab…`);
+  }
+  const host = await ensureCollabHost(conversation, ompBin);
   const link = await fetchCollabLink(host.instanceId, access, ompBin);
   console.error(`接入 ${host.sessionName || host.instanceId} (${access})`);
   const guest = connectGuest(link.url, displayName);

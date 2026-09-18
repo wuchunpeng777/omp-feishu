@@ -250,7 +250,7 @@ export function formatSnapshot(
 
 export function formatHostList(
   hosts: Array<{
-    instanceId: string;
+    instanceId?: string;
     pid?: number;
     sessionName?: string;
     cwd?: string;
@@ -258,35 +258,41 @@ export function formatHostList(
     access?: string;
     relayConnected?: boolean;
     inputRequired?: boolean;
+    sharing?: boolean;
   }>,
 ): CardView {
   if (hosts.length === 0) {
     return {
-      title: "没有 live collab",
+      title: "没有本机 TUI",
       template: "grey",
       markdown:
-        "本机没有正在分享的 omp 会话。\n\n在 TUI 里执行 `/collab`，或设置 `collab.autoStart: control`。",
+        "本机没有正在跑的 omp TUI。\n\n打开一个 omp 终端后再 `/list`。未分享的会话可以点「开启」自动 `/collab` 并接入。",
       buttons: [],
     };
   }
   const lines = hosts.map((host, i) => {
-    const name = host.sessionName || host.instanceId.slice(0, 8);
-    const relay = host.relayConnected === false ? " · 中继未连" : "";
+    const name = host.sessionName || host.instanceId?.slice(0, 8) || `pid ${host.pid ?? "?"}`;
+    const sharing = host.sharing === false ? " · 未分享" : " · 已分享";
+    const relay = host.sharing !== false && host.relayConnected === false ? " · 中继未连" : "";
     const ask = host.inputRequired ? " · 等待输入" : "";
     const cwd = host.cwd ? `\n  \`${host.cwd}\`` : "";
     const model = host.model ? ` · ${host.model}` : "";
-    return `**#${i + 1}** ${name} · pid ${host.pid ?? "?"}${model}${relay}${ask}${cwd}`;
+    return `**#${i + 1}** ${name} · pid ${host.pid ?? "?"}${model}${sharing}${relay}${ask}${cwd}`;
   });
   return {
-    title: `本机会话 ${hosts.length}`,
+    title: `本机 TUI ${hosts.length}`,
     template: "indigo",
-    markdown: lines.join("\n\n"),
-    buttons: hosts.slice(0, 6).map((host, i) => ({
-      text: `接入 #${i + 1}`,
-      action: "attach",
-      type: "primary",
-      payload: { instanceId: host.instanceId },
-    })),
+    markdown: `${lines.join("\n\n")}\n\n未分享的会话会先向该 TUI 发送 \`/collab\`，成功后再接入。`,
+    buttons: hosts.slice(0, 6).map((host, i) => {
+      const selector = host.instanceId || (host.pid != null ? String(host.pid) : "");
+      const sharing = host.sharing !== false;
+      return {
+        text: sharing ? `接入 #${i + 1}` : `开启 #${i + 1}`,
+        action: "attach",
+        type: sharing ? "primary" : "default",
+        payload: { instanceId: selector, selector },
+      };
+    }),
   };
 }
 
@@ -357,8 +363,8 @@ export const HELP_TEXT = `飞书里直接用 omp（A），也可以挂本机 TUI
 - \`/abort\` 打断
 
 **B · 挂已有 TUI**
-- \`/list\` 列出本机 collab
-- \`/attach [序号|pid|id]\` 接入
+- \`/list\` 列出本机正在跑的 TUI（含未开 collab 的）
+- \`/attach [序号|pid|id]\` 接入；未分享的会先开启 collab
 - \`/view [序号]\` 只读
 - \`/leave\` 离开 collab，回到 A
 
