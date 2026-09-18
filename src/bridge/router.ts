@@ -26,6 +26,7 @@ import { matchModels, parseThinkLevel } from "./select.ts";
 
 type CardPump = {
   live?: LiveCard;
+  liveGen: number;
   lastKey?: string;
   timer?: ReturnType<typeof setTimeout>;
   pending?: CardView;
@@ -106,6 +107,7 @@ export class Bridge {
         await this.feishu.sendText(msg.chatId, "主机还没就绪，稍后再发。");
         return;
       }
+      this.recycleLiveCard(collab);
       collab.guest.sendPrompt(text);
       return;
     }
@@ -125,6 +127,7 @@ export class Bridge {
       rpc.session.sendUiResponse(ui.reqId, text);
       return;
     }
+    this.recycleLiveCard(rpc);
     try {
       await rpc.session.prompt(text);
     } catch (err) {
@@ -309,6 +312,7 @@ export class Bridge {
         host,
         access,
         guest,
+        liveGen: 0,
         chain: Promise.resolve(),
       };
       this.collab.set(msg.chatId, binding);
@@ -343,6 +347,7 @@ export class Bridge {
 
   private async newRpc(chatId: string): Promise<void> {
     const rpc = await this.ensureRpc(chatId);
+    this.recycleLiveCard(rpc);
     await rpc.session.newSession();
     await this.persistRpc(chatId, rpc);
     await this.feishu.sendText(chatId, "已开新的 omp 会话。");
@@ -532,11 +537,12 @@ export class Bridge {
       cwd,
       sessionFile: rec?.sessionFile,
     });
-    const binding: RpcBinding = { kind: "rpc", session, chain: Promise.resolve() };
+    const binding: RpcBinding = { kind: "rpc", session, liveGen: 0, chain: Promise.resolve() };
     this.rpc.set(chatId, binding);
     session.subscribe((snap) =>
       this.queueCard(chatId, binding, snap, false, "omp"),
     );
+    this.recycleLiveCard(binding);
     await this.persistRpc(chatId, binding);
     return binding;
   }
@@ -586,14 +592,28 @@ export class Bridge {
       });
   }
 
+  private recycleLiveCard(binding: CardPump): void {
+    if (binding.timer) {
+      clearTimeout(binding.timer);
+      binding.timer = undefined;
+    }
+    binding.pending = undefined;
+    binding.lastKey = undefined;
+    binding.live = undefined;
+    binding.liveGen += 1;
+  }
+
   private async flushCard(
     chatId: string,
     binding: CardPump,
     view: CardView,
   ): Promise<void> {
+    const gen = binding.liveGen;
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
+    const next = await this.feishu.pushLiveCard(chatId, binding.live, view);
+    if (binding.liveGen !== gen) return;
     binding.lastKey = key;
-    binding.live = await this.feishu.pushLiveCard(chatId, binding.live, view);
+    binding.live = next;
   }
 
 }
