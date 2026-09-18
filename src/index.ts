@@ -13,6 +13,12 @@ import { loadBotConfig, loadOmpConfig } from "./config.ts";
 import { createFeishu } from "./feishu/bot.ts";
 import { RpcSession } from "./rpc/session.ts";
 
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException", err);
+});
 const args = process.argv.slice(2);
 const command = args[0];
 

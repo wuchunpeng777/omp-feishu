@@ -88,6 +88,24 @@ function kitDenied(res: { code?: number }): boolean {
   return res.code === 300311 || res.code === 99991663;
 }
 
+function parseCardValue(raw: unknown): Record<string, string> {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try {
+      return parseCardValue(JSON.parse(raw) as unknown);
+    } catch {
+      return {};
+    }
+  }
+  if (typeof raw !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
+
 export function createFeishu(config: AppConfig): FeishuApi {
   const domain =
     config.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
@@ -96,12 +114,12 @@ export function createFeishu(config: AppConfig): FeishuApi {
     appSecret: config.appSecret,
     domain,
   });
-  const wsClient = new Lark.WSClient({
+  const wsOpts = {
     appId: config.appId,
     appSecret: config.appSecret,
     domain,
     loggerLevel: Lark.LoggerLevel.info,
-  });
+  };
   let kitDisabled = false;
 
   async function sendCard(chatId: string, view: CardView): Promise<string | undefined> {
@@ -305,10 +323,10 @@ export function createFeishu(config: AppConfig): FeishuApi {
     return snapshot(view, { messageId, sequence });
   }
 
-  function start(onMessage: MessageHandler, onAction: ActionHandler): Promise<void> {
-    return wsClient.start({
-      eventDispatcher: new Lark.EventDispatcher({}).register({
-        "im.message.receive_v1": async (data) => {
+  async function start(onMessage: MessageHandler, onAction: ActionHandler): Promise<void> {
+    const eventDispatcher = new Lark.EventDispatcher({}).register({
+      "im.message.receive_v1": async (data) => {
+        try {
           const sender = data.sender as {
             sender_type?: string;
             sender_id?: { open_id?: string };
@@ -326,7 +344,13 @@ export function createFeishu(config: AppConfig): FeishuApi {
           const text = stripMentions(
             extractText(message.message_type ?? "text", message.content ?? ""),
           );
-          void onMessage({
+          console.log(
+            "收到消息",
+            message.chat_type ?? "p2p",
+            message.chat_id,
+            text.slice(0, 80),
+          );
+          await onMessage({
             chatId: message.chat_id,
             messageId: message.message_id,
             chatType: message.chat_type ?? "p2p",
@@ -334,25 +358,53 @@ export function createFeishu(config: AppConfig): FeishuApi {
             text,
             mentioned: Array.isArray(message.mentions) && message.mentions.length > 0,
           });
-        },
-        "card.action.trigger": async (data) => {
+        } catch (err) {
+          console.error("处理消息失败", err);
+        }
+      },
+      "card.action.trigger": async (data) => {
+        try {
           const rec = data as {
             operator?: { open_id?: string };
-            action?: { value?: Record<string, string> };
+            action?: { value?: unknown };
             context?: { open_chat_id?: string; chat_id?: string };
           };
-          const value = rec.action?.value ?? {};
+          const value = parseCardValue(rec.action?.value);
           const chatId = rec.context?.open_chat_id ?? rec.context?.chat_id ?? "";
-          if (!chatId || !value.action) return;
-          void onAction({
+          if (!chatId || !value.action) {
+            console.error("卡片回调缺字段", rec.context, value);
+            return { toast: { type: "error", content: "回调数据不完整" } };
+          }
+          console.log("收到卡片", chatId, value.action);
+          await onAction({
             chatId,
             openId: rec.operator?.open_id ?? "",
             action: value.action,
             payload: value,
           });
-        },
-      }),
+          return {
+            toast: {
+              type: "info",
+              content: value.action === "leave" ? "已离开" : "已处理",
+            },
+          };
+        } catch (err) {
+          console.error("处理卡片失败", err);
+          return { toast: { type: "error", content: "处理失败" } };
+        }
+      },
     });
+
+    for (;;) {
+      const wsClient = new Lark.WSClient(wsOpts);
+      try {
+        await wsClient.start({ eventDispatcher });
+        await Promise.withResolvers<void>().promise;
+      } catch (err) {
+        console.error("飞书长连接失败，3s 后重连", err);
+        await Bun.sleep(3000);
+      }
+    }
   }
 
   return { sendCard, replyCard, patchCard, pushLiveCard, sendText, start };

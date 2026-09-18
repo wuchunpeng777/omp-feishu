@@ -59,6 +59,20 @@ export class Bridge {
   }
 
   async onMessage(msg: IncomingMessage): Promise<void> {
+    try {
+      await this.handleMessage(msg);
+    } catch (err) {
+      console.error("onMessage", err);
+      await this.feishu
+        .sendText(
+          msg.chatId,
+          `处理失败：${err instanceof Error ? err.message : String(err)}`,
+        )
+        .catch(() => {});
+    }
+  }
+
+  private async handleMessage(msg: IncomingMessage): Promise<void> {
     if (!this.allowed(msg.openId)) {
       await this.feishu.sendText(msg.chatId, "你不在白名单里。");
       return;
@@ -93,7 +107,16 @@ export class Bridge {
       return;
     }
 
-    const rpc = await this.ensureRpc(msg.chatId);
+    let rpc: RpcBinding;
+    try {
+      rpc = await this.ensureRpc(msg.chatId);
+    } catch (err) {
+      await this.feishu.sendText(
+        msg.chatId,
+        `无法启动 omp：${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
     const ui = rpc.session.snapshot().uiRequest;
     if (ui) {
       rpc.session.sendUiResponse(ui.reqId, text);
@@ -110,6 +133,14 @@ export class Bridge {
   }
 
   async onAction(action: CardAction): Promise<void> {
+    try {
+      await this.handleAction(action);
+    } catch (err) {
+      console.error("onAction", err);
+    }
+  }
+
+  private async handleAction(action: CardAction): Promise<void> {
     if (!this.allowed(action.openId)) return;
     const fake: IncomingMessage = {
       chatId: action.chatId,
