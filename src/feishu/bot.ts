@@ -20,6 +20,36 @@ export type IncomingMessage = {
   mentioned: boolean;
 };
 
+const MESSAGE_DEDUP_TTL_MS = 10 * 60 * 1000;
+const MESSAGE_DEDUP_LIMIT = 4096;
+
+/** Prevents provider retries from executing one user message more than once. */
+export class MessageDeduper {
+  private readonly seen = new Map<string, number>();
+
+  constructor(
+    private readonly now: () => number = () => Date.now(),
+    private readonly ttlMs = MESSAGE_DEDUP_TTL_MS,
+  ) {}
+
+  claim(messageId: string): boolean {
+    if (!messageId) return true;
+    const now = this.now();
+    for (const [id, seenAt] of this.seen) {
+      if (now - seenAt < this.ttlMs) break;
+      this.seen.delete(id);
+    }
+    if (this.seen.has(messageId)) return false;
+    this.seen.set(messageId, now);
+    while (this.seen.size > MESSAGE_DEDUP_LIMIT) {
+      const oldest = this.seen.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.seen.delete(oldest);
+    }
+    return true;
+  }
+}
+
 export type CardAction = {
   chatId: string;
   openId: string;
@@ -322,6 +352,7 @@ export function createFeishu(config: AppConfig): FeishuApi {
     const messageId = await fallbackPatchOrSend(chatId, live.messageId, view);
     return snapshot(view, { messageId, sequence });
   }
+  const messageDeduper = new MessageDeduper();
 
   async function start(onMessage: MessageHandler, onAction: ActionHandler): Promise<void> {
     const eventDispatcher = new Lark.EventDispatcher({}).register({
@@ -341,6 +372,10 @@ export function createFeishu(config: AppConfig): FeishuApi {
             mentions?: unknown[];
           };
           if (!message?.chat_id || !message.message_id) return;
+          if (!messageDeduper.claim(message.message_id)) {
+            console.log("忽略重复消息", message.message_id);
+            return;
+          }
           const text = stripMentions(
             extractText(message.message_type ?? "text", message.content ?? ""),
           );
@@ -350,13 +385,18 @@ export function createFeishu(config: AppConfig): FeishuApi {
             message.chat_id,
             text.slice(0, 80),
           );
-          await onMessage({
-            chatId: message.chat_id,
-            messageId: message.message_id,
-            chatType: message.chat_type ?? "p2p",
-            openId: sender?.sender_id?.open_id ?? "",
-            text,
-            mentioned: Array.isArray(message.mentions) && message.mentions.length > 0,
+          // Feishu retries events that are not acknowledged within 3 seconds.
+          void Promise.resolve(
+            onMessage({
+              chatId: message.chat_id,
+              messageId: message.message_id,
+              chatType: message.chat_type ?? "p2p",
+              openId: sender?.sender_id?.open_id ?? "",
+              text,
+              mentioned: Array.isArray(message.mentions) && message.mentions.length > 0,
+            }),
+          ).catch((err) => {
+            console.error("处理消息失败", err);
           });
         } catch (err) {
           console.error("处理消息失败", err);
