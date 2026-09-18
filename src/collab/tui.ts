@@ -3,11 +3,35 @@
 export type TuiProcess = {
   pid: number;
   cwd?: string;
+  parentPid?: number;
 };
 
-function isRpcCommand(commandLine: string | undefined): boolean {
+export function isRpcCommand(commandLine: string | undefined): boolean {
   if (!commandLine) return false;
   return /(?:^|\s)--mode(?:\s+|=)rpc(?:-ui)?(?:\s|$)/.test(commandLine);
+}
+
+export function isWorkerCommand(commandLine: string | undefined): boolean {
+  if (!commandLine) return false;
+  return commandLine.includes("__omp_worker") || commandLine.includes("omp-feishu");
+}
+
+export function isInteractiveTui(name: string | undefined, commandLine: string | undefined): boolean {
+  if (isRpcCommand(commandLine) || isWorkerCommand(commandLine)) return false;
+  const cmd = commandLine ?? "";
+  const exe = (name ?? "").toLowerCase();
+  if (exe === "omp.exe" || /(^|[\\/])omp(\.exe)?(\s|$)/.test(cmd)) return true;
+  return cmd.includes("pi-coding-agent");
+}
+
+/** omp.exe 是包装进程，真正 TUI / collab pid 是子进程 bun pi-coding-agent。 */
+export function collapseTuiTree(rows: TuiProcess[]): TuiProcess[] {
+  const listed = new Set(rows.map((row) => row.pid));
+  const dropParents = new Set<number>();
+  for (const row of rows) {
+    if (row.parentPid != null && listed.has(row.parentPid)) dropParents.add(row.parentPid);
+  }
+  return rows.filter((row) => !dropParents.has(row.pid)).sort((a, b) => a.pid - b.pid);
 }
 
 function parseJsonList(raw: string): unknown[] {
@@ -78,13 +102,19 @@ public static class ProcCwd {
   }
 }
 '@
-Get-CimInstance Win32_Process -Filter "Name='omp.exe'" | ForEach-Object {
+Get-CimInstance Win32_Process -Filter "Name='omp.exe' OR Name='bun.exe' OR Name='node.exe'" | ForEach-Object {
   $cmd = [string]$_.CommandLine
+  $name = [string]$_.Name
+  if ($name -ne 'omp.exe' -and $cmd -notmatch 'pi-coding-agent') { return }
+  if ($cmd -match '__omp_worker') { return }
+  if ($cmd -match 'omp-feishu') { return }
   if ($cmd -match '--mode(\\s+|=)rpc') { return }
   [pscustomobject]@{
     pid = $_.ProcessId
+    parentPid = $_.ParentProcessId
     cwd = [ProcCwd]::Get($_.ProcessId)
     commandLine = $cmd
+    name = $name
   }
 } | ConvertTo-Json -Compress
 `;
@@ -98,14 +128,18 @@ using System;
 using System.Runtime.InteropServices;
 public static class ConInject {
   const uint KEY_EVENT = 1;
-  const uint WM_CHAR = 0x0102;
-  [DllImport("kernel32.dll")] public static extern bool FreeConsole();
-  [DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
-  [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
-  [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+  const uint GENERIC_READ_WRITE = 0xC0000000u;
+  const uint FILE_SHARE_READ_WRITE = 3;
+  const uint OPEN_EXISTING = 3;
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr CreateFile(string n, uint a, uint s, IntPtr p, uint d, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] r, int n, out int w);
-  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint c, uint m);
   [StructLayout(LayoutKind.Explicit)]
   public struct INPUT_RECORD {
     [FieldOffset(0)] public ushort EventType;
@@ -125,30 +159,60 @@ public static class ConInject {
     rec.EventType = (ushort)KEY_EVENT;
     rec.KeyEvent.bKeyDown = down ? 1 : 0;
     rec.KeyEvent.wRepeatCount = 1;
-    rec.KeyEvent.UnicodeChar = ch;
-    rec.KeyEvent.wVirtualKeyCode = ch == (char)13 ? (ushort)0x0D : ch == (char)27 ? (ushort)0x1B : (ushort)char.ToUpper(ch);
+    ushort vk;
+    uint mods = 0;
+    if (ch == (char)13) {
+      vk = 0x0D;
+      rec.KeyEvent.UnicodeChar = 13;
+    } else if (ch == (char)27) {
+      vk = 0x1B;
+      rec.KeyEvent.UnicodeChar = 0;
+    } else {
+      rec.KeyEvent.UnicodeChar = ch;
+      short mapped = VkKeyScan(ch);
+      if (mapped == -1) {
+        vk = ch == '/' ? (ushort)0xBF : (ushort)char.ToUpper(ch);
+      } else {
+        vk = (ushort)(mapped & 0xFF);
+        if ((mapped & 0x100) != 0) mods |= 0x0010;
+        if ((mapped & 0x200) != 0) mods |= 0x0008;
+        if ((mapped & 0x400) != 0) mods |= 0x0002;
+      }
+    }
+    rec.KeyEvent.wVirtualKeyCode = vk;
+    rec.KeyEvent.wVirtualScanCode = (ushort)MapVirtualKey(vk, 0);
+    rec.KeyEvent.dwControlKeyState = mods;
     return rec;
   }
   public static string Send(int pid, string text) {
     FreeConsole();
     if (!AttachConsole((uint)pid)) return "attach_failed";
+    IntPtr conin = CreateFile("CONIN$", GENERIC_READ_WRITE, FILE_SHARE_READ_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+    if (conin == new IntPtr(-1)) return "conin_failed";
     try {
-      IntPtr hwnd = GetConsoleWindow();
-      IntPtr hin = GetStdHandle(-10);
+      INPUT_RECORD[] recs = new INPUT_RECORD[text.Length * 2];
+      int i = 0;
       foreach (char ch in text) {
-        if (hwnd != IntPtr.Zero) PostMessage(hwnd, WM_CHAR, (IntPtr)ch, IntPtr.Zero);
-        if (hin != IntPtr.Zero && hin != new IntPtr(-1)) {
-          INPUT_RECORD[] recs = new INPUT_RECORD[] { Key(true, ch), Key(false, ch) };
-          int written;
-          WriteConsoleInput(hin, recs, 2, out written);
-        }
+        recs[i++] = Key(true, ch);
+        recs[i++] = Key(false, ch);
       }
+      int written;
+      if (!WriteConsoleInput(conin, recs, recs.Length, out written)) return "write_failed";
+      if (written != recs.Length) return "write_short:" + written;
       return "ok";
-    } finally { FreeConsole(); }
+    } finally {
+      CloseHandle(conin);
+      FreeConsole();
+    }
   }
 }
 '@
 [ConInject]::Send($ProcessId, $Text)
+`;
+
+const PARENT_SCRIPT = `
+param([int]$ProcessId)
+(Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId").ParentProcessId
 `;
 
 async function listWindowsTui(): Promise<TuiProcess[]> {
@@ -156,18 +220,29 @@ async function listWindowsTui(): Promise<TuiProcess[]> {
   const rows: TuiProcess[] = [];
   for (const item of parseJsonList(raw)) {
     if (!item || typeof item !== "object") continue;
-    const rec = item as { pid?: unknown; cwd?: unknown; commandLine?: unknown };
+    const rec = item as {
+      pid?: unknown;
+      parentPid?: unknown;
+      cwd?: unknown;
+      commandLine?: unknown;
+      name?: unknown;
+    };
     const pid = typeof rec.pid === "number" ? rec.pid : Number(rec.pid);
     if (!Number.isInteger(pid) || pid <= 0) continue;
-    if (isRpcCommand(typeof rec.commandLine === "string" ? rec.commandLine : undefined)) continue;
+    const commandLine = typeof rec.commandLine === "string" ? rec.commandLine : undefined;
+    const name = typeof rec.name === "string" ? rec.name : undefined;
+    if (!isInteractiveTui(name, commandLine)) continue;
+    const parentRaw =
+      typeof rec.parentPid === "number" ? rec.parentPid : Number(rec.parentPid);
+    const parentPid = Number.isInteger(parentRaw) && parentRaw > 0 ? parentRaw : undefined;
     const cwd = typeof rec.cwd === "string" && rec.cwd.trim() ? rec.cwd.trim() : undefined;
-    rows.push({ pid, cwd });
+    rows.push({ pid, cwd, parentPid });
   }
-  return rows.sort((a, b) => a.pid - b.pid);
+  return collapseTuiTree(rows);
 }
 
 async function listPosixTui(): Promise<TuiProcess[]> {
-  const proc = Bun.spawn(["ps", "-ax", "-o", "pid=,args="], {
+  const proc = Bun.spawn(["ps", "-ax", "-o", "pid=,ppid=,args="], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -175,30 +250,25 @@ async function listPosixTui(): Promise<TuiProcess[]> {
   if (code !== 0) return [];
   const rows: TuiProcess[] = [];
   for (const line of stdout.split("\n")) {
-    const match = /^\s*(\d+)\s+(\S.*)$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S.*)$/.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
-    const args = match[2];
-    if (!/(^|[\\/])omp(\.exe)?(\s|$)/.test(args) && !args.includes("pi-coding-agent")) continue;
-    if (isRpcCommand(args)) continue;
-    if (args.includes("__omp_worker") || args.includes("omp-feishu")) continue;
+    const parentPid = Number(match[2]);
+    const args = match[3];
+    if (!isInteractiveTui(undefined, args)) continue;
     let cwd: string | undefined;
     try {
       cwd = (await Bun.file(`/proc/${pid}/cwd`).text().catch(() => "")).trim() || undefined;
     } catch {
       cwd = undefined;
     }
-    if (!cwd) {
-      try {
-        const link = await Bun.spawn(["readlink", "-f", `/proc/${pid}/cwd`], { stdout: "pipe" }).exited;
-        void link;
-      } catch {
-        /* ignore */
-      }
-    }
-    rows.push({ pid, cwd });
+    rows.push({
+      pid,
+      cwd,
+      parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : undefined,
+    });
   }
-  return rows;
+  return collapseTuiTree(rows);
 }
 
 export async function listTuiProcesses(): Promise<TuiProcess[]> {
@@ -207,6 +277,26 @@ export async function listTuiProcesses(): Promise<TuiProcess[]> {
     return await listPosixTui();
   } catch {
     return [];
+  }
+}
+
+export async function parentOf(pid: number): Promise<number | undefined> {
+  try {
+    if (process.platform === "win32") {
+      const raw = await runPowerShell(PARENT_SCRIPT, [String(pid)]);
+      const value = Number(raw.trim());
+      return Number.isInteger(value) && value > 0 ? value : undefined;
+    }
+    const proc = Bun.spawn(["ps", "-o", "ppid=", "-p", String(pid)], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (code !== 0) return undefined;
+    const value = Number(stdout.trim());
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -229,5 +319,7 @@ export async function typeIntoTui(pid: number, text: string): Promise<void> {
 }
 
 export async function startCollabOnTui(pid: number): Promise<void> {
-  await typeIntoTui(pid, `\u001b/collab\r`);
+  await typeIntoTui(pid, "\u001b");
+  await Bun.sleep(80);
+  await typeIntoTui(pid, "/collab\r");
 }

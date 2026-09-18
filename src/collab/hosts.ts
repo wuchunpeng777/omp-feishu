@@ -2,7 +2,7 @@
 
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { startCollabOnTui, listTuiProcesses } from "./tui.ts";
+import { startCollabOnTui, listTuiProcesses, parentOf } from "./tui.ts";
 
 export type CollabAccess = "view" | "control";
 
@@ -25,6 +25,7 @@ export type CollabHost = {
 export type LiveConversation = {
   sharing: boolean;
   pid?: number;
+  parentPid?: number;
   instanceId?: string;
   sessionId?: string;
   sessionName?: string;
@@ -161,7 +162,13 @@ async function sessionMetaForCwd(
 
 export function mergeConversations(
   hosts: CollabHost[],
-  tuis: Array<{ pid: number; cwd?: string; sessionId?: string; sessionName?: string }>,
+  tuis: Array<{
+    pid: number;
+    parentPid?: number;
+    cwd?: string;
+    sessionId?: string;
+    sessionName?: string;
+  }>,
 ): LiveConversation[] {
   const byPid = new Map<number, LiveConversation>();
   const extra: LiveConversation[] = [];
@@ -181,12 +188,19 @@ export function mergeConversations(
     if (typeof host.pid === "number") byPid.set(host.pid, conv);
     else extra.push(conv);
   }
+  const wrappers = new Set<number>();
   for (const tui of tuis) {
-    const existing = byPid.get(tui.pid);
+    if (tui.parentPid != null) wrappers.add(tui.parentPid);
+  }
+  for (const tui of tuis) {
+    if (wrappers.has(tui.pid) && !byPid.has(tui.pid)) continue;
+    const existing =
+      byPid.get(tui.pid) ?? (tui.parentPid != null ? byPid.get(tui.parentPid) : undefined);
     if (existing) {
       existing.cwd = existing.cwd || tui.cwd;
       existing.sessionId = existing.sessionId || tui.sessionId;
       existing.sessionName = existing.sessionName || tui.sessionName;
+      if (existing.parentPid == null && tui.parentPid != null) existing.parentPid = tui.parentPid;
       continue;
     }
     extra.push({
@@ -195,6 +209,7 @@ export function mergeConversations(
       cwd: tui.cwd,
       sessionId: tui.sessionId,
       sessionName: tui.sessionName,
+      ...(tui.parentPid != null ? { parentPid: tui.parentPid } : {}),
     });
   }
   const merged = [...byPid.values(), ...extra];
@@ -252,6 +267,7 @@ function sleep(ms: number): Promise<void> {
   return promise;
 }
 
+
 export async function ensureCollabHost(
   conversation: LiveConversation,
   ompBin = "omp",
@@ -280,8 +296,17 @@ export async function ensureCollabHost(
   while (Date.now() < deadline) {
     await sleep(pollMs);
     const hosts = await listCollabHosts(ompBin);
-    const found = hosts.find((h) => h.pid === conversation.pid);
+    const found = hosts.find(
+      (host) =>
+        host.pid != null &&
+        (host.pid === conversation.pid || host.pid === conversation.parentPid),
+    );
     if (found) return found;
+    for (const host of hosts) {
+      if (host.pid == null) continue;
+      const ppid = await parentOf(host.pid);
+      if (ppid === conversation.pid) return host;
+    }
   }
   throw new Error(
     `已向 pid ${conversation.pid} 发送 /collab，但 ${Math.round(timeoutMs / 1000)} 秒内没有出现在 collab 列表。可在该 TUI 里手动执行 /collab 后再 /attach`,

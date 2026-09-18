@@ -41,6 +41,20 @@ test("collab 主机与未分享 TUI 按 pid 合并", () => {
   ]);
 });
 
+test("跳过 omp.exe 包装进程，只留 bun agent 和未分享 TUI", () => {
+  const merged = mergeConversations(
+    [{ instanceId: "abc", pid: 303376, sessionName: "live" }],
+    [
+      { pid: 302348, cwd: "C:\\a" },
+      { pid: 303376, parentPid: 302348, cwd: "C:\\a" },
+      { pid: 10664, parentPid: 41812, cwd: "C:\\b", sessionName: "idle" },
+    ],
+  );
+  expect(merged.map((row) => row.pid)).toEqual([10664, 303376]);
+  expect(merged[0]).toMatchObject({ sharing: false, sessionName: "idle", parentPid: 41812 });
+  expect(merged[1]).toMatchObject({ sharing: true, sessionName: "live", instanceId: "abc" });
+});
+
 test("按序号 pid instanceId 解析会话", () => {
   const rows = mergeConversations(
     [{ instanceId: "deadbeef", pid: 42, sessionName: "alpha" }],
