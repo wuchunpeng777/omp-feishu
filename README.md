@@ -43,11 +43,14 @@ cp .env.example .env
 
 点卡片上的「接入 #N」若弹出「该应用尚未配置卡片回调」：不要点「立即配置」去填 HTTP 地址。按上面第 4 步在后台配长连接回调，再发一版即可。
 
-群里建议配 `FEISHU_ALLOW_OPEN_IDS`，否则谁 @ 都能驱动你这台机器。
+群里要 @机器人 或打 `/`。建议配 `FEISHU_ALLOW_OPEN_IDS`，否则谁 @ 都能驱动你这台机器。
 
 可选：
 
 ```
+FEISHU_DOMAIN=feishu           # feishu 国内；lark 国际
+OMP_BIN=omp                    # 本机 omp 可执行文件
+OMP_DISPLAY_NAME=飞书          # collab guest 显示名
 OMP_CWD=/path/to/repo          # A 默认工作目录，也可用 /cwd 换
 OMP_FEISHU_DATA=~/.omp-feishu  # 飞书 chat → 会话文件映射
 ```
@@ -72,7 +75,7 @@ bun run running    # 看是否在跑
 | `/cwd [目录]` | A 查看 / 换工作目录 |
 | `/model [名称]` | A 列出 / 切换模型（模糊匹配，也可点卡片按钮） |
 | `/think [档位]` | A 查看 / 设置思考强度：off, minimal, low, medium, high, xhigh, max, auto |
-| `/list` | 列出本机正在跑的 TUI（含未开 collab 的） |
+| `/list` | 列出本机正在跑的 TUI（含未开 collab 的）。卡片按钮最多前 6 个，其余 `/attach N` |
 | `/attach 1` | 按序号 / pid / instanceId 接入；未分享的会先开启 collab |
 | `/view 1` | 只读接入 TUI |
 | `/leave` | 离开 collab，回到 A |
@@ -82,7 +85,7 @@ bun run running    # 看是否在跑
 
 卡片按钮：打断、离开（仅 B）、回答主机 `ask`。A 空闲时还有「模型」「思考」。
 
-每条飞书对话记住自己的 omp 会话文件（`~/.omp-feishu/chats.json`），下次还是接着聊。
+每条新 prompt 发一张新卡片，避免多轮后要往上翻。每条飞书对话记住自己的 omp 会话文件（`~/.omp-feishu/chats.json`），下次还是接着聊。
 
 ## 不经过飞书自测
 
@@ -105,4 +108,4 @@ bun src/index.ts prompt "只回 ping"
                本机执行工具，CardKit 流式刷新卡片
 ```
 
-接入 B：枚举本机 `omp.exe` TUI + `omp collab list --json`。未分享的向该 TUI 注入 `/collab`，再 `omp collab link`。guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。
+接入 B：扫本机交互式 TUI 进程 + `omp collab list --json`。Windows 上 collab pid 是 `bun pi-coding-agent`，不是包装进程 `omp.exe`。未分享的向该 TUI 注入 `/collab`，再 `omp collab link`。guest 协议与 [my.omp.sh](https://my.omp.sh/) 相同。
