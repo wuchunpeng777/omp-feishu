@@ -28,6 +28,8 @@ export class RpcClient {
   private stdin: RpcStdin;
   private closed = false;
   private lastReady?: RpcFrame;
+  private stderrTail = "";
+  private emittedClose = false;
 
   private constructor(private readonly proc: ReturnType<typeof Bun.spawn>) {
     const stdin = proc.stdin;
@@ -48,6 +50,7 @@ export class RpcClient {
     });
     const client = new RpcClient(proc);
     void client.drainStderr();
+    void client.watchExit();
     const ready = client.waitForReady();
     void client.readLoop();
     await ready;
@@ -91,11 +94,7 @@ export class RpcClient {
   async dispose(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error("rpc closed"));
-    }
-    this.pending.clear();
+    this.failAll(new Error("rpc closed"));
     try {
       this.stdin.end();
     } catch {
@@ -149,7 +148,7 @@ export class RpcClient {
         }
       }
     } finally {
-      this.failAll(new Error("omp rpc stdout 关闭"));
+      this.shutdown(new Error("omp rpc stdout 关闭"));
     }
   }
 
@@ -192,6 +191,24 @@ export class RpcClient {
     this.pending.clear();
   }
 
+  private watchExit(): void {
+    void this.proc.exited.then((code) => {
+      this.shutdown(new Error(`omp rpc 退出 ${code ?? "?"}`));
+    });
+  }
+
+  private shutdown(err: Error): void {
+    const first = !this.closed;
+    this.closed = true;
+    this.failAll(err);
+    if (!first || this.emittedClose) return;
+    this.emittedClose = true;
+    const tail = this.stderrTail.trim().split("\n").slice(-6).join("\n");
+    const message = tail ? `${err.message}\n${tail}` : err.message;
+    const frame: RpcFrame = { type: "rpc_closed", error: message };
+    for (const listener of this.listeners) listener(frame);
+  }
+
   private async drainStderr(): Promise<void> {
     const reader = this.proc.stderr.getReader();
     const decoder = new TextDecoder();
@@ -204,9 +221,17 @@ export class RpcClient {
       while (nl >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
-        if (line.trim()) console.error("[omp]", line);
+        this.captureStderr(line);
         nl = buf.indexOf("\n");
       }
     }
+    this.captureStderr(buf);
+  }
+
+  private captureStderr(line: string): void {
+    const text = line.trim();
+    if (!text) return;
+    this.stderrTail = `${this.stderrTail}${this.stderrTail ? "\n" : ""}${text}`.slice(-4000);
+    console.error("[omp]", text);
   }
 }

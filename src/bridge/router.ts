@@ -542,6 +542,10 @@ export class Bridge {
     if (existing && existing.session.snapshot().status !== "ended") {
       return existing;
     }
+    if (existing) {
+      this.rpc.delete(chatId);
+      void existing.session.dispose().catch(() => {});
+    }
     const rec = await this.store.get(chatId);
     const cwd = rec?.cwd ?? this.config.cwd;
     const session = await RpcSession.start({

@@ -100,6 +100,7 @@ export class RpcSession {
   }
 
   async prompt(text: string): Promise<void> {
+    this.error = undefined;
     this.entries = [
       ...this.entries,
       {
@@ -110,13 +111,21 @@ export class RpcSession {
     this.awaitingTurn = true;
     this.emit();
     const streaming = this.state?.isStreaming === true;
-    const res = await this.client.request({
-      type: "prompt",
-      message: text,
-      ...(streaming ? { streamingBehavior: "followUp" } : {}),
-    });
-    const data = res.data as Record<string, unknown> | undefined;
-    if (data?.agentInvoked === false) this.awaitingTurn = false;
+    try {
+      const res = await this.client.request({
+        type: "prompt",
+        message: text,
+        ...(streaming ? { streamingBehavior: "followUp" } : {}),
+      });
+      const data = res.data as Record<string, unknown> | undefined;
+      if (data?.agentInvoked === false) this.awaitingTurn = false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.failTurn(message, {
+        endSession: /stdout 关闭|rpc 已关闭|rpc closed|omp rpc 退出/.test(message),
+      });
+      throw err;
+    }
   }
 
   abort(): void {
@@ -294,6 +303,7 @@ export class RpcSession {
     const type = String(frame.type ?? "");
     switch (type) {
       case "agent_start":
+        this.error = undefined;
         if (this.state?.isStreaming !== true) {
           this.tools = new Map();
           this.progress = new Map();
@@ -302,7 +312,7 @@ export class RpcSession {
         this.awaitingTurn = true;
         break;
       case "agent_end":
-        if (frame.isTerminal === false) break;
+        if (frame.isTerminal === false || frame.willRetry === true) break;
         this.state = { ...this.state, isStreaming: false };
         this.awaitingTurn = false;
         for (const [id, tool] of this.tools) {
@@ -312,7 +322,15 @@ export class RpcSession {
           this.streamingMessage = undefined;
           this.streamingEnded = false;
         }
+        {
+          const turnErr = assistantTurnError(frame);
+          if (turnErr) this.noteError(turnErr);
+        }
         void this.refreshState().catch(() => {});
+        break;
+      case "agent_settled":
+        this.state = { ...this.state, isStreaming: false };
+        this.awaitingTurn = false;
         break;
       case "prompt_result":
         if (frame.agentInvoked !== true) {
@@ -421,6 +439,9 @@ export class RpcSession {
           level: String(frame.level ?? "info"),
           message: String(frame.message ?? ""),
         });
+        if (String(frame.level ?? "") === "error" && typeof frame.message === "string") {
+          this.noteError(frame.message);
+        }
         break;
       case "command_output":
         this.notices.push({
@@ -442,6 +463,31 @@ export class RpcSession {
         if (thinkingLevel) this.state = { ...this.state, thinkingLevel };
         break;
       }
+      case "rpc_closed":
+        this.failTurn(String(frame.error ?? "omp rpc 已断开"), { endSession: true });
+        break;
+      case "auto_retry_start":
+        this.notices.push({
+          level: "info",
+          message: `自动重试 ${String(frame.attempt ?? "?")}/${String(frame.maxAttempts ?? "?")}：${String(frame.errorMessage ?? "瞬时错误")}`,
+        });
+        break;
+      case "auto_retry_end": {
+        const retryErr = retryFinalError(frame);
+        if (retryErr) this.failTurn(retryErr, { endSession: false });
+        break;
+      }
+      case "extension_error":
+        this.noteError(
+          `扩展错误：${String(frame.error ?? frame.event ?? "unknown")}`,
+        );
+        break;
+      case "compaction_end":
+        if (frame.result == null && frame.aborted !== true) {
+          const msg = rpcErrorText(frame);
+          if (msg) this.noteError(`压缩失败：${msg}`);
+        }
+        break;
       default:
         break;
     }
@@ -466,8 +512,28 @@ export class RpcSession {
           ...this.entries,
           { type: "message", message: this.streamingMessage },
         ];
+        const turnErr = assistantTurnError({
+          type: "agent_end",
+          messages: [message ?? this.streamingMessage],
+        });
+        if (turnErr) this.noteError(turnErr);
       }
     }
+  }
+  private noteError(message: string): void {
+    const text = message.trim() || "omp 报错中断";
+    this.error = text;
+    if (!this.notices.some((n) => n.message === text)) {
+      this.notices.push({ level: "error", message: text });
+    }
+  }
+
+  private failTurn(message: string, opts: { endSession: boolean }): void {
+    this.awaitingTurn = false;
+    this.state = { ...this.state, isStreaming: false };
+    this.noteError(message);
+    if (opts.endSession) this.status = "ended";
+    this.emit();
   }
 
   private emit(): void {
@@ -517,4 +583,42 @@ function messageText(message: AgentMessage | undefined): string {
     parts.push(text);
   }
   return parts.join("");
+}
+
+export function assistantTurnError(frame: RpcFrame): string | undefined {
+  if (frame.willRetry === true || frame.isTerminal === false) return undefined;
+  const fromField = rpcErrorText(frame);
+  if (fromField) return fromField;
+  if (!Array.isArray(frame.messages)) return undefined;
+  for (let i = frame.messages.length - 1; i >= 0; i--) {
+    const item = frame.messages[i];
+    if (!item || typeof item !== "object") continue;
+    const rec = item as {
+      role?: unknown;
+      stopReason?: unknown;
+      errorMessage?: unknown;
+    };
+    if (rec.role !== "assistant") continue;
+    if (rec.stopReason !== "error" && rec.stopReason !== "aborted") continue;
+    if (typeof rec.errorMessage === "string" && rec.errorMessage.trim()) {
+      return rec.errorMessage.trim();
+    }
+    const text = messageText(asAgentMessage(item));
+    if (text) return text;
+    return rec.stopReason === "aborted" ? "已中断" : "模型报错中断";
+  }
+  return undefined;
+}
+
+export function retryFinalError(frame: RpcFrame): string | undefined {
+  if (frame.success !== false) return undefined;
+  return rpcErrorText(frame) ?? "自动重试失败";
+}
+
+function rpcErrorText(frame: RpcFrame): string | undefined {
+  for (const key of ["errorMessage", "finalError", "error"] as const) {
+    const value = frame[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }

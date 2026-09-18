@@ -49,6 +49,26 @@ test("运行中卡片标记 streaming", () => {
   expect(idle.streaming).toBe(false);
 });
 
+test("会话报错显示错误而不是断开", () => {
+  const view = formatSnapshot(snap({ error: "429 overloaded", status: "live" }), "omp", {
+    showLeave: false,
+  });
+  expect(view.title.startsWith("错误")).toBe(true);
+  expect(view.template).toBe("red");
+  expect(view.streaming).toBe(false);
+  expect(view.markdown).toContain("**错误** 429 overloaded");
+});
+
+test("进程断开显示断开", () => {
+  const view = formatSnapshot(
+    snap({ error: "omp rpc stdout 关闭", status: "ended" }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.title.startsWith("错误")).toBe(true);
+  expect(view.markdown).toContain("**断开** omp rpc stdout 关闭");
+});
+
 test("过程区留下已完成工具和进行中输出", () => {
   const view = formatSnapshot(
     snap({

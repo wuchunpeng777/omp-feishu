@@ -215,7 +215,10 @@ export function formatSnapshot(
   }
 
 
-  if (snap.error) lines.push(`\n**断开** ${snap.error}`);
+  if (snap.error) {
+    const label = snap.status === "ended" ? "断开" : "错误";
+    lines.push(`\n**${label}** ${snap.error}`);
+  }
 
   const buttons: CardButton[] = [];
   if (!snap.readOnly && snap.status === "live") {
