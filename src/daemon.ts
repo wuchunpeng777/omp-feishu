@@ -92,6 +92,7 @@ async function killTree(pid: number): Promise<void> {
     await Bun.spawn(["taskkill", "/PID", String(pid), "/T", "/F"], {
       stdout: "ignore",
       stderr: "ignore",
+      windowsHide: true,
     }).exited;
     return;
   }

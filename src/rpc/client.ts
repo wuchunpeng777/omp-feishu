@@ -44,6 +44,7 @@ export class RpcClient {
       stdout: "pipe",
       stderr: "pipe",
       env: process.env,
+      windowsHide: true,
     });
     const client = new RpcClient(proc);
     void client.drainStderr();

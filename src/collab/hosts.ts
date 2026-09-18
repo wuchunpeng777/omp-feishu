@@ -30,6 +30,7 @@ async function runOmp(ompBin: string, args: string[]): Promise<string> {
   const proc = Bun.spawn([ompBin, ...args], {
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: true,
   });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
