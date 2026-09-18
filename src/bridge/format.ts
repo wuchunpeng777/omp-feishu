@@ -78,6 +78,17 @@ function toolArgSummary(args: unknown): string {
   return "";
 }
 
+function brief(value: unknown, max: number): string {
+  if (value == null) return "";
+  if (typeof value === "string") return truncate(value.replaceAll("\n", " ").trim(), max);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return truncate(JSON.stringify(value), max);
+  } catch {
+    return "";
+  }
+}
+
 export function formatSnapshot(
   snap: GuestSnapshot,
   hostLabel: string,
@@ -133,20 +144,38 @@ export function formatSnapshot(
   if (userText) lines.push(`\n**最近指令**\n${truncate(userText, 400)}`);
 
   if (snap.tools.length > 0) {
-    lines.push("\n**进行中的工具**");
-    for (const tool of snap.tools) {
+    lines.push("\n**过程**");
+    for (const tool of snap.tools.slice(-12)) {
+      const running = tool.status !== "done";
+      const mark = running ? "进行中" : "完成";
       const arg = toolArgSummary(tool.args);
       const intent = tool.intent ? ` · ${truncate(tool.intent, 40)}` : "";
-      lines.push(`- \`${tool.toolName}\`${arg ? ` ${arg}` : ""}${intent}`);
+      lines.push(
+        `- ${mark} \`${tool.toolName}\`${arg ? ` ${arg}` : ""}${intent}`,
+      );
+      const detail = brief(tool.partialResult, running ? 160 : 80);
+      if (detail) lines.push(`  ${detail}`);
     }
   }
 
-  if (snap.subagentLifecycle.length > 0) {
+  if (snap.subagentLifecycle.length > 0 || snap.subagentProgress.length > 0) {
     lines.push("\n**子代理**");
     for (const agent of snap.subagentLifecycle.slice(-8)) {
       const name = agent.name ?? agent.agent ?? agent.id;
       const st = agent.status ?? "";
       lines.push(`- ${name}${st ? ` · ${st}` : ""}`);
+    }
+    for (const item of snap.subagentProgress.slice(-8)) {
+      const p = item.progress;
+      if (!p) continue;
+      const label = p.label ?? p.id ?? "subagent";
+      const pct =
+        typeof p.percent === "number"
+          ? p.percent <= 1
+            ? ` ${(p.percent * 100).toFixed(0)}%`
+            : ` ${p.percent.toFixed(0)}%`
+          : "";
+      lines.push(`- ${label}${pct}`);
     }
   }
 
@@ -169,9 +198,12 @@ export function formatSnapshot(
   }
 
   if (snap.notices.length > 0) {
-    const last = snap.notices[snap.notices.length - 1]!;
-    lines.push(`\n_${last.level}: ${truncate(last.message, 200)}_`);
+    lines.push("");
+    for (const notice of snap.notices.slice(-3)) {
+      lines.push(`_${notice.level}: ${truncate(notice.message, 200)}_`);
+    }
   }
+
 
   if (snap.error) lines.push(`\n**断开** ${snap.error}`);
 

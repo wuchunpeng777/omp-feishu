@@ -234,7 +234,9 @@ export class CollabGuest {
       case "state":
         this.state = frame.state as GuestSnapshot["state"];
         if (!this.state?.isStreaming) {
-          this.tools = new Map();
+          for (const [id, tool] of this.tools) {
+            if (tool.status !== "done") this.tools.set(id, { ...tool, status: "done" });
+          }
           if (this.streamingEnded) {
             this.streamingMessage = undefined;
             this.streamingEnded = false;
@@ -318,6 +320,7 @@ export class CollabGuest {
           args: event.args,
           intent: event.intent as string | undefined,
           startedAt: Date.now(),
+          status: "running",
         });
         break;
       }
@@ -329,21 +332,40 @@ export class CollabGuest {
           toolName: String(event.toolName ?? prev?.toolName ?? "tool"),
           args: event.args ?? prev?.args,
           intent: (event.intent as string | undefined) ?? prev?.intent,
-          partialResult: event.partialResult,
+          partialResult: event.partialResult ?? prev?.partialResult,
           startedAt: prev?.startedAt ?? Date.now(),
+          status: prev?.status ?? "running",
         });
         break;
       }
-      case "tool_execution_end":
-        this.tools.delete(String(event.toolCallId ?? ""));
+      case "tool_execution_end": {
+        const id = String(event.toolCallId ?? "");
+        const prev = this.tools.get(id);
+        this.tools.set(id, {
+          toolCallId: id,
+          toolName: String(event.toolName ?? prev?.toolName ?? "tool"),
+          args: event.args ?? prev?.args,
+          intent: (event.intent as string | undefined) ?? prev?.intent,
+          partialResult: event.result ?? event.partialResult ?? prev?.partialResult,
+          startedAt: prev?.startedAt ?? Date.now(),
+          status: "done",
+        });
         break;
+      }
       case "agent_start":
+        if (this.state?.isStreaming !== true) {
+          this.tools = new Map();
+          this.progress = new Map();
+        }
         if (this.state) this.state = { ...this.state, isStreaming: true };
         else this.state = { isStreaming: true };
         break;
       case "agent_end":
         if (this.state) this.state = { ...this.state, isStreaming: false };
         else this.state = { isStreaming: false };
+        for (const [id, tool] of this.tools) {
+          if (tool.status !== "done") this.tools.set(id, { ...tool, status: "done" });
+        }
         break;
       case "notice":
         this.notices.push({

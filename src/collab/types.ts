@@ -38,6 +38,7 @@ export type LiveTool = {
   intent?: string;
   partialResult?: unknown;
   startedAt: number;
+  status?: "running" | "done";
 };
 
 export type UiRequest = {

@@ -273,6 +273,10 @@ export class RpcSession {
     const type = String(frame.type ?? "");
     switch (type) {
       case "agent_start":
+        if (this.state?.isStreaming !== true) {
+          this.tools = new Map();
+          this.progress = new Map();
+        }
         this.state = { ...this.state, isStreaming: true };
         this.awaitingTurn = true;
         break;
@@ -280,7 +284,9 @@ export class RpcSession {
         if (frame.isTerminal === false) break;
         this.state = { ...this.state, isStreaming: false };
         this.awaitingTurn = false;
-        this.tools = new Map();
+        for (const [id, tool] of this.tools) {
+          if (tool.status !== "done") this.tools.set(id, { ...tool, status: "done" });
+        }
         if (this.streamingEnded) {
           this.streamingMessage = undefined;
           this.streamingEnded = false;
@@ -305,6 +311,7 @@ export class RpcSession {
           args: frame.args,
           intent: typeof frame.intent === "string" ? frame.intent : undefined,
           startedAt: Date.now(),
+          status: "running",
         });
         break;
       case "tool_execution_update": {
@@ -316,14 +323,27 @@ export class RpcSession {
           args: frame.args ?? prev?.args,
           intent:
             typeof frame.intent === "string" ? frame.intent : prev?.intent,
-          partialResult: frame.partialResult,
+          partialResult: frame.partialResult ?? prev?.partialResult,
           startedAt: prev?.startedAt ?? Date.now(),
+          status: prev?.status ?? "running",
         });
         break;
       }
-      case "tool_execution_end":
-        this.tools.delete(String(frame.toolCallId ?? ""));
+      case "tool_execution_end": {
+        const id = String(frame.toolCallId ?? "");
+        const prev = this.tools.get(id);
+        this.tools.set(id, {
+          toolCallId: id,
+          toolName: String(frame.toolName ?? prev?.toolName ?? "tool"),
+          args: frame.args ?? prev?.args,
+          intent:
+            typeof frame.intent === "string" ? frame.intent : prev?.intent,
+          partialResult: frame.result ?? frame.partialResult ?? prev?.partialResult,
+          startedAt: prev?.startedAt ?? Date.now(),
+          status: "done",
+        });
         break;
+      }
       case "subagent_lifecycle": {
         const id = String(frame.id ?? frame.subagentId ?? "");
         if (id) {
