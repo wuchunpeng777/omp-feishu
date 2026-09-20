@@ -20,6 +20,7 @@ export type CardView = {
   markdown: string;
   buttons: CardButton[];
   streaming?: boolean;
+  notify?: "done" | "ask";
 };
 
 export type FormatSnapshotOpts = {
@@ -75,6 +76,74 @@ function lastOfRole(entries: SessionEntry[], role: string): AgentMessage | undef
   return undefined;
 }
 
+/** 只取本轮（最后一条用户消息之后）的助手回复，避免新卡片先画出上一轮。 */
+function lastAssistantThisTurn(entries: SessionEntry[]): AgentMessage | undefined {
+  let lastUser = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type === "message" && entry.message?.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  for (let i = entries.length - 1; i > lastUser; i--) {
+    const entry = entries[i];
+    if (entry?.type === "message" && entry.message?.role === "assistant") {
+      return entry.message;
+    }
+  }
+  return undefined;
+}
+
+export type UiChoice = { label: string; value: string };
+
+export function uiChoices(req: { method?: string; options?: unknown } | undefined): UiChoice[] {
+  if (!req) return [];
+  if (!Array.isArray(req.options)) {
+    return req.method === "confirm"
+      ? [
+          { label: "确认", value: "确认" },
+          { label: "取消", value: "取消" },
+        ]
+      : [];
+  }
+  const out: UiChoice[] = [];
+  for (const item of req.options) {
+    if (typeof item === "string" && item.trim()) {
+      out.push({ label: item.trim(), value: item.trim() });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const labelRaw = rec.label ?? rec.text ?? rec.title ?? rec.value;
+    const valueRaw = rec.value ?? rec.label ?? rec.text ?? rec.title;
+    const label = typeof labelRaw === "string" ? labelRaw.trim() : "";
+    const value = typeof valueRaw === "string" ? valueRaw.trim() : "";
+    if (label || value) out.push({ label: label || value, value: value || label });
+  }
+  return out;
+}
+
+/** 从正文抽出 1. 2. 这种选项，供卡片按钮点选。 */
+export function extractNumberedChoices(text: string): string[] {
+  const items = new Map<number, string>();
+  for (const line of text.split("\n")) {
+    const match = line.match(/^\s*(\d+)[.)、]\s+(\S.*)$/);
+    if (!match) continue;
+    const n = Number(match[1]);
+    const body = match[2].trim();
+    if (n >= 1 && n <= 8 && body) items.set(n, truncate(body, 80));
+  }
+  if (items.size < 2) return [];
+  const out: string[] = [];
+  for (let i = 1; i <= items.size; i++) {
+    const item = items.get(i);
+    if (!item) return [];
+    out.push(item);
+  }
+  return out.length >= 2 && out.length <= 8 ? out : [];
+}
+
 function toolArgSummary(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const rec = args as Record<string, unknown>;
@@ -104,30 +173,35 @@ export function formatSnapshot(
   hostLabel: string,
   opts?: FormatSnapshotOpts,
 ): CardView {
-  const streaming = snap.state?.isStreaming === true;
+  const asking = Boolean(snap.uiRequest);
+  const streaming = snap.state?.isStreaming === true && !asking;
   const status = snap.error
     ? "错误"
-    : snap.status === "live"
-      ? streaming
-        ? "运行中"
-        : "已接入"
-      : snap.status === "waiting"
-        ? "等待主机"
-        : snap.status === "reconnecting"
-          ? "重连中"
-          : snap.status === "connecting"
-            ? "连接中"
-            : "已断开";
+    : asking
+      ? "待选择"
+      : snap.status === "live"
+        ? streaming
+          ? "运行中"
+          : "已接入"
+        : snap.status === "waiting"
+          ? "等待主机"
+          : snap.status === "reconnecting"
+            ? "重连中"
+            : snap.status === "connecting"
+              ? "连接中"
+              : "已断开";
 
   const template: CardView["template"] = snap.error
     ? "red"
-    : streaming
-      ? "orange"
-      : snap.status === "live"
-        ? "green"
-        : snap.status === "ended"
-          ? "grey"
-          : "blue";
+    : asking
+      ? "indigo"
+      : streaming
+        ? "orange"
+        : snap.status === "live"
+          ? "green"
+          : snap.status === "ended"
+            ? "grey"
+            : "blue";
 
   const cwd = typeof snap.header?.cwd === "string" ? snap.header.cwd : "";
   const titleName =
@@ -153,7 +227,13 @@ export function formatSnapshot(
   const userText = messageText(lastUser);
   if (userText) lines.push(`\n**最近指令**\n${truncate(userText, 400)}`);
 
-  if (snap.tools.length > 0) {
+  const live = snap.streamingMessage;
+  const liveText = messageText(live);
+  const thisTurnText = messageText(lastAssistantThisTurn(snap.entries));
+  const output = liveText || thisTurnText;
+  const showProcess = snap.tools.length > 0 && (streaming || Boolean(output) || asking);
+
+  if (showProcess) {
     lines.push("\n**过程**");
     for (const tool of snap.tools.slice(-12)) {
       const running = tool.status !== "done";
@@ -189,22 +269,29 @@ export function formatSnapshot(
     }
   }
 
-  const live = snap.streamingMessage;
   const thinking = thinkingText(live);
   if (thinking) {
     lines.push(`\n**思考**\n${truncate(thinking, 500)}`);
   }
-  const liveText = messageText(live);
-  const lastAssistant = messageText(lastOfRole(snap.entries, "assistant"));
-  const output = liveText || lastAssistant;
   if (output) {
     lines.push(`\n**输出**\n${truncate(output, MAX_TEXT)}`);
   }
 
+  const choices = uiChoices(snap.uiRequest);
   if (snap.uiRequest) {
     const req = snap.uiRequest;
-    lines.push(`\n**主机询问** ${req.title ?? req.method ?? ""}`);
+    const heading =
+      req.method === "confirm" ? "确认" : req.method === "select" ? "请选择" : "询问";
+    lines.push(`\n**${heading}** ${req.title ?? req.method ?? ""}`.trimEnd());
     if (req.message) lines.push(String(req.message));
+    if (choices.length > 0) {
+      for (const [i, choice] of choices.entries()) {
+        const detail = req.optionDetails?.[i]?.description;
+        lines.push(`${i + 1}. ${choice.label}${detail ? ` — ${detail}` : ""}`);
+      }
+    } else if (req.method === "input" || req.method === "editor") {
+      lines.push("请直接回复文字。");
+    }
   }
 
   if (snap.notices.length > 0) {
@@ -214,30 +301,48 @@ export function formatSnapshot(
     }
   }
 
-
   if (snap.error) {
     const label = snap.status === "ended" ? "断开" : "错误";
     lines.push(`\n**${label}** ${snap.error}`);
   }
 
+  const picks =
+    !asking && !streaming && !snap.readOnly ? extractNumberedChoices(output) : [];
+
   const buttons: CardButton[] = [];
   if (!snap.readOnly && snap.status === "live") {
     buttons.push({ text: "打断", action: "abort", type: "danger" });
   }
-  if (opts?.showModelControls && !snap.readOnly && snap.status === "live" && !streaming) {
+  if (
+    opts?.showModelControls &&
+    !snap.readOnly &&
+    snap.status === "live" &&
+    !streaming &&
+    !asking &&
+    picks.length === 0
+  ) {
     buttons.push({ text: "模型", action: "models", type: "default" });
     buttons.push({ text: "思考", action: "think", type: "default" });
   }
   if (opts?.showLeave !== false) {
     buttons.push({ text: "离开", action: "leave", type: "default" });
   }
-  if (snap.uiRequest?.options && !snap.readOnly) {
-    for (const option of snap.uiRequest.options.slice(0, 6)) {
+  if (!snap.readOnly && snap.uiRequest && choices.length > 0) {
+    for (const choice of choices.slice(0, 8)) {
       buttons.push({
-        text: truncate(option, 20),
+        text: truncate(choice.label, 20),
         action: "ui",
         type: "primary",
-        payload: { reqId: snap.uiRequest.reqId, value: option },
+        payload: { reqId: snap.uiRequest.reqId, value: choice.value },
+      });
+    }
+  } else if (picks.length > 0) {
+    for (const option of picks.slice(0, 8)) {
+      buttons.push({
+        text: truncate(option, 20),
+        action: "pick",
+        type: "primary",
+        payload: { value: option },
       });
     }
   }
@@ -248,6 +353,7 @@ export function formatSnapshot(
     markdown: truncate(lines.join("\n"), MAX_MD),
     buttons,
     streaming,
+    notify: asking ? "ask" : streaming ? undefined : "done",
   };
 }
 

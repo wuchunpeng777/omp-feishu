@@ -79,6 +79,12 @@ export type FeishuApi = {
     view: CardView,
   ) => Promise<LiveCard>;
   sendText: (chatId: string, text: string) => Promise<void>;
+  notifyDone: (
+    chatId: string,
+    messageId: string | undefined,
+    openId: string | undefined,
+    kind: "done" | "ask",
+  ) => Promise<void>;
   start: (onMessage: MessageHandler, onAction: ActionHandler) => Promise<void>;
 };
 
@@ -208,6 +214,34 @@ export function createFeishu(config: AppConfig): FeishuApi {
       },
     });
     if (res.code !== 0) console.error("飞书发文本失败", res.code, res.msg);
+  }
+
+  async function urgentApp(messageId: string, openId: string): Promise<boolean> {
+    try {
+      const res = await client.im.v1.message.urgentApp({
+        path: { message_id: messageId },
+        params: { user_id_type: "open_id" },
+        data: { user_id_list: [openId] },
+      });
+      if (res.code !== 0) {
+        console.error("飞书应用内加急失败", res.code, res.msg);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error("飞书应用内加急失败", err);
+      return false;
+    }
+  }
+
+  async function notifyDone(
+    chatId: string,
+    messageId: string | undefined,
+    openId: string | undefined,
+    kind: "done" | "ask",
+  ): Promise<void> {
+    if (messageId && openId && (await urgentApp(messageId, openId))) return;
+    await sendText(chatId, kind === "ask" ? "请在卡片上选择" : "本轮已完成");
   }
 
   async function fallbackPatchOrSend(
@@ -425,7 +459,12 @@ export function createFeishu(config: AppConfig): FeishuApi {
           return {
             toast: {
               type: "info",
-              content: value.action === "leave" ? "已离开" : "已处理",
+              content:
+                value.action === "leave"
+                  ? "已离开"
+                  : value.action === "ui" || value.action === "pick"
+                    ? "已选择"
+                    : "已处理",
             },
           };
         } catch (err) {
@@ -447,5 +486,5 @@ export function createFeishu(config: AppConfig): FeishuApi {
     }
   }
 
-  return { sendCard, replyCard, patchCard, pushLiveCard, sendText, start };
+  return { sendCard, replyCard, patchCard, pushLiveCard, sendText, notifyDone, start };
 }

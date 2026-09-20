@@ -101,6 +101,15 @@ export class RpcSession {
 
   async prompt(text: string): Promise<void> {
     this.error = undefined;
+    const alreadyStreaming = this.state?.isStreaming === true;
+    if (!alreadyStreaming) {
+      this.tools = new Map();
+      this.progress = new Map();
+      this.lifecycle = new Map();
+      this.streamingMessage = undefined;
+      this.streamingEnded = false;
+      this.uiRequest = undefined;
+    }
     this.entries = [
       ...this.entries,
       {
@@ -109,16 +118,20 @@ export class RpcSession {
       },
     ];
     this.awaitingTurn = true;
+    this.state = { ...this.state, isStreaming: true };
     this.emit();
-    const streaming = this.state?.isStreaming === true;
     try {
       const res = await this.client.request({
         type: "prompt",
         message: text,
-        ...(streaming ? { streamingBehavior: "followUp" } : {}),
+        ...(alreadyStreaming ? { streamingBehavior: "followUp" } : {}),
       });
       const data = res.data as Record<string, unknown> | undefined;
-      if (data?.agentInvoked === false) this.awaitingTurn = false;
+      if (data?.agentInvoked === false) {
+        this.awaitingTurn = false;
+        this.state = { ...this.state, isStreaming: false };
+        this.emit();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.failTurn(message, {
@@ -425,9 +438,14 @@ export class RpcSession {
           reqId: String(frame.id ?? ""),
           method: method || undefined,
           title: typeof frame.title === "string" ? frame.title : undefined,
-          message: typeof frame.message === "string" ? frame.message : undefined,
+          message:
+            typeof frame.message === "string"
+              ? frame.message
+              : typeof frame.placeholder === "string"
+                ? frame.placeholder
+                : undefined,
           options: Array.isArray(frame.options)
-            ? frame.options.filter((item): item is string => typeof item === "string")
+            ? frame.options
             : method === "confirm"
               ? ["确认", "取消"]
               : undefined,

@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { formatHostList, formatModelList, formatSnapshot, formatThinkCard } from "./format.ts";
+import {
+  extractNumberedChoices,
+  formatHostList,
+  formatModelList,
+  formatSnapshot,
+  formatThinkCard,
+  uiChoices,
+} from "./format.ts";
 import type { GuestSnapshot } from "../collab/types.ts";
 
 function snap(partial: Partial<GuestSnapshot> = {}): GuestSnapshot {
@@ -163,3 +170,128 @@ test("空列表提示打开 TUI", () => {
   expect(view.title).toBe("没有本机 TUI");
   expect(view.buttons).toEqual([]);
 });
+
+test("新一轮卡片不带上一轮输出", () => {
+  const view = formatSnapshot(
+    snap({
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      entries: [
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "old" }] },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+        },
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "new question" }] },
+        },
+      ],
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.markdown).toContain("new question");
+  expect(view.markdown).not.toContain("previous answer");
+  expect(view.streaming).toBe(true);
+});
+
+test("本轮助手回复才进输出", () => {
+  const view = formatSnapshot(
+    snap({
+      entries: [
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "now" }] },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: "this turn" }] },
+        },
+      ],
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.markdown).toContain("this turn");
+});
+
+test("select 选项变成可点按钮并退出流式", () => {
+  const view = formatSnapshot(
+    snap({
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      uiRequest: {
+        reqId: "r1",
+        method: "select",
+        title: "选一个",
+        options: ["方案A", { label: "方案B", value: "b" }],
+      },
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.streaming).toBe(false);
+  expect(view.title.startsWith("待选择")).toBe(true);
+  expect(view.notify).toBe("ask");
+  expect(view.markdown).toContain("请选择");
+  expect(view.buttons.filter((b) => b.action === "ui")).toEqual([
+    {
+      text: "方案A",
+      action: "ui",
+      type: "primary",
+      payload: { reqId: "r1", value: "方案A" },
+    },
+    {
+      text: "方案B",
+      action: "ui",
+      type: "primary",
+      payload: { reqId: "r1", value: "b" },
+    },
+  ]);
+});
+
+test("正文编号选项变成 pick 按钮", () => {
+  const view = formatSnapshot(
+    snap({
+      entries: [
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "怎么做" }] },
+        },
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "请选择：\n1. 方案甲\n2. 方案乙" }],
+          },
+        },
+      ],
+    }),
+    "omp",
+    { showLeave: false, showModelControls: true },
+  );
+  expect(view.buttons.filter((b) => b.action === "pick").map((b) => b.payload?.value)).toEqual([
+    "方案甲",
+    "方案乙",
+  ]);
+  expect(view.buttons.map((b) => b.action)).not.toContain("models");
+});
+
+test("uiChoices 解析对象选项", () => {
+  expect(uiChoices({ method: "select", options: [{ text: "快", value: "fast" }] })).toEqual([
+    { label: "快", value: "fast" },
+  ]);
+  expect(uiChoices({ method: "confirm" })).toEqual([
+    { label: "确认", value: "确认" },
+    { label: "取消", value: "取消" },
+  ]);
+});
+
+test("extractNumberedChoices 要连续从 1 起", () => {
+  expect(extractNumberedChoices("1. a\n2. b\n3. c")).toEqual(["a", "b", "c"]);
+  expect(extractNumberedChoices("1. a\n3. c")).toEqual([]);
+  expect(extractNumberedChoices("only one\n1. a")).toEqual([]);
+});
+

@@ -46,7 +46,7 @@ export type UiRequest = {
   method?: string;
   title?: string;
   message?: string;
-  options?: string[];
+  options?: unknown[];
   optionDetails?: Array<{ description?: string }>;
   [key: string]: unknown;
 };

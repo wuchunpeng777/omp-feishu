@@ -29,6 +29,7 @@ type CardPump = {
   live?: LiveCard;
   liveGen: number;
   lastKey?: string;
+  lastOpenId?: string;
   timer?: ReturnType<typeof setTimeout>;
   pending?: CardView;
   chain: Promise<void>;
@@ -95,6 +96,7 @@ export class Bridge {
 
     const collab = this.collab.get(msg.chatId);
     if (collab) {
+      collab.lastOpenId = msg.openId;
       const ui = collab.guest.snapshot().uiRequest;
       if (ui) {
         collab.guest.sendUiResponse(ui.reqId, text);
@@ -123,6 +125,7 @@ export class Bridge {
       );
       return;
     }
+    rpc.lastOpenId = msg.openId;
     const ui = rpc.session.snapshot().uiRequest;
     if (ui) {
       rpc.session.sendUiResponse(ui.reqId, text);
@@ -193,11 +196,19 @@ export class Bridge {
         if (!reqId || value === undefined) break;
         const collab = this.collab.get(action.chatId);
         if (collab) {
+          collab.lastOpenId = action.openId;
           collab.guest.sendUiResponse(reqId, value);
           break;
         }
         const rpc = this.rpc.get(action.chatId);
+        if (rpc) rpc.lastOpenId = action.openId;
         rpc?.session.sendUiResponse(reqId, value);
+        break;
+      }
+      case "pick": {
+        const value = action.payload.value;
+        if (!value) break;
+        await this.handleMessage({ ...fake, text: value });
         break;
       }
       default:
@@ -325,6 +336,7 @@ export class Bridge {
         access,
         guest,
         liveGen: 0,
+        lastOpenId: msg.openId,
         chain: Promise.resolve(),
       };
       this.collab.set(msg.chatId, binding);
@@ -625,11 +637,24 @@ export class Bridge {
     view: CardView,
   ): Promise<void> {
     const gen = binding.liveGen;
+    const wasStreaming = binding.live?.streaming === true;
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     const next = await this.feishu.pushLiveCard(chatId, binding.live, view);
     if (binding.liveGen !== gen) return;
     binding.lastKey = key;
     binding.live = next;
+    if (
+      wasStreaming &&
+      view.streaming !== true &&
+      (view.notify === "done" || view.notify === "ask")
+    ) {
+      await this.feishu.notifyDone(
+        chatId,
+        next.messageId,
+        binding.lastOpenId,
+        view.notify,
+      );
+    }
   }
 
 }
