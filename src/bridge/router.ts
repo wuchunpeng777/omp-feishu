@@ -30,7 +30,11 @@ type CardPump = {
   liveGen: number;
   lastKey?: string;
   lastOpenId?: string;
+  lastSnap?: GuestSnapshot;
+  lastShowLeave?: boolean;
+  lastLabel?: string;
   timer?: ReturnType<typeof setTimeout>;
+  tick?: ReturnType<typeof setInterval>;
   pending?: CardView;
   chain: Promise<void>;
 };
@@ -364,7 +368,7 @@ export class Bridge {
       return;
     }
     this.collab.delete(chatId);
-    clearTimeout(bound.timer);
+    this.stopPump(bound);
     bound.guest.close();
     if (notify) await this.feishu.sendText(chatId, "已离开 collab，回到飞书 omp。");
   }
@@ -390,7 +394,7 @@ export class Bridge {
     const old = this.rpc.get(msg.chatId);
     if (old) {
       this.rpc.delete(msg.chatId);
-      clearTimeout(old.timer);
+      this.stopPump(old);
       await old.session.dispose();
     }
     await this.store.set(msg.chatId, { cwd });
@@ -556,6 +560,7 @@ export class Bridge {
     }
     if (existing) {
       this.rpc.delete(chatId);
+      this.stopPump(existing);
       void existing.session.dispose().catch(() => {});
     }
     const rec = await this.store.get(chatId);
@@ -589,10 +594,14 @@ export class Bridge {
     showLeave: boolean,
     label: string,
   ): void {
+    binding.lastSnap = snap;
+    binding.lastShowLeave = showLeave;
+    binding.lastLabel = label;
     const view = formatSnapshot(snap, label, {
       showLeave,
       showModelControls: !showLeave,
     });
+    this.armTick(chatId, binding, view.streaming === true);
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
     if (key === binding.lastKey) return;
     binding.pending = view;
@@ -602,7 +611,7 @@ export class Bridge {
       binding.timer = undefined;
     }
     if (binding.timer) return;
-    const delay = endStream ? 0 : view.streaming ? 180 : 350;
+    const delay = !binding.live || endStream ? 0 : view.streaming ? 180 : 350;
     binding.timer = setTimeout(() => {
       binding.timer = undefined;
       const pending = binding.pending;
@@ -620,14 +629,45 @@ export class Bridge {
       });
   }
 
-  private recycleLiveCard(binding: CardPump): void {
+  private stopPump(binding: CardPump): void {
     if (binding.timer) {
       clearTimeout(binding.timer);
       binding.timer = undefined;
     }
+    if (binding.tick) {
+      clearInterval(binding.tick);
+      binding.tick = undefined;
+    }
     binding.pending = undefined;
+  }
+
+  private armTick(chatId: string, binding: CardPump, streaming: boolean): void {
+    if (!streaming) {
+      if (binding.tick) {
+        clearInterval(binding.tick);
+        binding.tick = undefined;
+      }
+      return;
+    }
+    if (binding.tick) return;
+    binding.tick = setInterval(() => {
+      const snap = binding.lastSnap;
+      if (!snap) return;
+      this.queueCard(
+        chatId,
+        binding,
+        snap,
+        binding.lastShowLeave === true,
+        binding.lastLabel ?? "",
+      );
+    }, 1000);
+  }
+
+  private recycleLiveCard(binding: CardPump): void {
+    this.stopPump(binding);
     binding.lastKey = undefined;
     binding.live = undefined;
+    binding.lastSnap = undefined;
     binding.liveGen += 1;
   }
 

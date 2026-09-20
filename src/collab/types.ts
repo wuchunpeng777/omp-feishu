@@ -74,6 +74,7 @@ export type GuestSnapshot = {
   agents: unknown[];
   streamingMessage?: AgentMessage;
   streamingEnded: boolean;
+  turnStartedAt?: number;
   tools: LiveTool[];
   uiRequest?: UiRequest;
   subagentProgress: SubagentProgress[];

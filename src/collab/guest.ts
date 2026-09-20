@@ -45,6 +45,9 @@ export class CollabGuest {
   private notices: Array<{ level: string; message: string }> = [];
   private welcomeTimer: ReturnType<typeof setTimeout> | null = null;
   private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingUserText?: string;
+  private turnStartedAt?: number;
+
   private transcriptWaiters = new Map<number, TranscriptWaiter>();
 
   constructor(linkText: string, displayName: string) {
@@ -102,6 +105,7 @@ export class CollabGuest {
       agents: this.agents,
       streamingMessage: this.streamingMessage,
       streamingEnded: this.streamingEnded,
+      turnStartedAt: this.turnStartedAt,
       tools: [...this.tools.values()],
       uiRequest: this.uiRequest,
       subagentProgress: [...this.progress.values()],
@@ -111,7 +115,28 @@ export class CollabGuest {
   }
 
   sendPrompt(text: string): void {
+    const alreadyStreaming = this.state?.isStreaming === true;
+    if (!alreadyStreaming) {
+      this.tools = new Map();
+      this.progress = new Map();
+      this.lifecycle = new Map();
+      this.streamingMessage = undefined;
+      this.streamingEnded = false;
+      this.uiRequest = undefined;
+      this.uiQueue = [];
+      this.turnStartedAt = Date.now();
+    }
+    this.pendingUserText = text;
+    this.entries = [
+      ...this.entries,
+      {
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text }] },
+      },
+    ];
+    this.state = { ...this.state, isStreaming: true };
     this.transport.send({ t: "prompt", text });
+    this.emit();
   }
 
   sendAbort(): void {
@@ -217,6 +242,15 @@ export class CollabGuest {
       }
       case "entry": {
         const entry = frame.entry as SessionEntry;
+        if (
+          this.pendingUserText !== undefined &&
+          entry?.type === "message" &&
+          entry.message?.role === "user" &&
+          messagePlain(entry.message) === this.pendingUserText
+        ) {
+          this.pendingUserText = undefined;
+          break;
+        }
         this.entries = [...this.entries, entry];
         if (
           this.streamingEnded &&
@@ -356,6 +390,9 @@ export class CollabGuest {
         if (this.state?.isStreaming !== true) {
           this.tools = new Map();
           this.progress = new Map();
+          this.streamingMessage = undefined;
+          this.streamingEnded = false;
+          this.turnStartedAt ??= Date.now();
         }
         if (this.state) this.state = { ...this.state, isStreaming: true };
         else this.state = { isStreaming: true };
@@ -422,4 +459,18 @@ export function connectGuest(linkText: string, displayName: string): CollabGuest
   const guest = new CollabGuest(linkText, displayName);
   guest.connect();
   return guest;
+}
+
+function messagePlain(message: AgentMessage | undefined): string {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const rec = block as { type?: string; text?: string };
+    if (rec.type === "text" && typeof rec.text === "string") parts.push(rec.text);
+  }
+  return parts.join("").trim();
 }

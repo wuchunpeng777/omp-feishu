@@ -26,6 +26,7 @@ export type CardView = {
 export type FormatSnapshotOpts = {
   showLeave?: boolean;
   showModelControls?: boolean;
+  now?: number;
 };
 
 const MAX_MD = 3500;
@@ -144,28 +145,14 @@ export function extractNumberedChoices(text: string): string[] {
   return out.length >= 2 && out.length <= 8 ? out : [];
 }
 
-function toolArgSummary(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const rec = args as Record<string, unknown>;
-  const preferred = ["command", "path", "file", "query", "pattern", "i", "url"];
-  for (const key of preferred) {
-    const value = rec[key];
-    if (typeof value === "string" && value.trim()) {
-      return truncate(value.replaceAll("\n", " "), 80);
-    }
-  }
-  return "";
-}
-
-function brief(value: unknown, max: number): string {
-  if (value == null) return "";
-  if (typeof value === "string") return truncate(value.replaceAll("\n", " ").trim(), max);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try {
-    return truncate(JSON.stringify(value), max);
-  } catch {
-    return "";
-  }
+function formatElapsed(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
+  return `${m}:${pad(s)}`;
 }
 
 export function formatSnapshot(
@@ -206,7 +193,13 @@ export function formatSnapshot(
   const cwd = typeof snap.header?.cwd === "string" ? snap.header.cwd : "";
   const titleName =
     (typeof snap.header?.title === "string" && snap.header.title) || hostLabel;
-  const title = `${status} · ${truncate(titleName, 24)}`;
+  const elapsed =
+    streaming && snap.turnStartedAt
+      ? formatElapsed((opts?.now ?? Date.now()) - snap.turnStartedAt)
+      : "";
+  const title = elapsed
+    ? `${status} · ${elapsed}`
+    : `${status} · ${truncate(titleName, 24)}`;
 
   const lines: string[] = [];
   lines.push(`**会话** ${hostLabel}${snap.readOnly ? " · 只读" : ""}`);
@@ -228,25 +221,22 @@ export function formatSnapshot(
   if (userText) lines.push(`\n**最近指令**\n${truncate(userText, 400)}`);
 
   const live = snap.streamingMessage;
-  const liveText = messageText(live);
+  let liveText = messageText(live);
   const thisTurnText = messageText(lastAssistantThisTurn(snap.entries));
-  const output = liveText || thisTurnText;
-  const showProcess = snap.tools.length > 0 && (streaming || Boolean(output) || asking);
-
-  if (showProcess) {
-    lines.push("\n**过程**");
-    for (const tool of snap.tools.slice(-12)) {
-      const running = tool.status !== "done";
-      const mark = running ? "进行中" : "完成";
-      const arg = toolArgSummary(tool.args);
-      const intent = tool.intent ? ` · ${truncate(tool.intent, 40)}` : "";
-      lines.push(
-        `- ${mark} \`${tool.toolName}\`${arg ? ` ${arg}` : ""}${intent}`,
-      );
-      const detail = brief(tool.partialResult, running ? 160 : 80);
-      if (detail) lines.push(`  ${detail}`);
-    }
+  if (!thisTurnText) {
+    const prevText = messageText(lastOfRole(snap.entries, "assistant"));
+    if (liveText && liveText === prevText) liveText = "";
   }
+  const lastEntry = snap.entries[snap.entries.length - 1];
+  if (
+    streaming &&
+    lastEntry?.type === "message" &&
+    lastEntry.message?.role === "assistant" &&
+    liveText === messageText(lastEntry.message)
+  ) {
+    liveText = "";
+  }
+  const output = liveText || (streaming ? "" : thisTurnText);
 
   if (snap.subagentLifecycle.length > 0 || snap.subagentProgress.length > 0) {
     lines.push("\n**子代理**");

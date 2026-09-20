@@ -34,6 +34,7 @@ export class RpcSession {
   private sessionFile?: string;
   private off?: () => void;
   private awaitingTurn = false;
+  private turnStartedAt?: number;
 
   private constructor(
     private client: RpcClient,
@@ -75,6 +76,7 @@ export class RpcSession {
       agents: [],
       streamingMessage: this.streamingMessage,
       streamingEnded: this.streamingEnded,
+      turnStartedAt: this.turnStartedAt,
       tools: [...this.tools.values()],
       uiRequest: this.uiRequest,
       subagentProgress: [...this.progress.values()],
@@ -109,6 +111,7 @@ export class RpcSession {
       this.streamingMessage = undefined;
       this.streamingEnded = false;
       this.uiRequest = undefined;
+      this.turnStartedAt = Date.now();
     }
     this.entries = [
       ...this.entries,
@@ -190,6 +193,7 @@ export class RpcSession {
     this.streamingEnded = false;
     this.uiRequest = undefined;
     this.awaitingTurn = false;
+    this.turnStartedAt = undefined;
     await this.refreshState();
     this.emit();
   }
@@ -320,6 +324,7 @@ export class RpcSession {
         if (this.state?.isStreaming !== true) {
           this.tools = new Map();
           this.progress = new Map();
+          this.turnStartedAt ??= Date.now();
         }
         this.state = { ...this.state, isStreaming: true };
         this.awaitingTurn = true;

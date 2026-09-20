@@ -76,7 +76,7 @@ test("进程断开显示断开", () => {
   expect(view.markdown).toContain("**断开** omp rpc stdout 关闭");
 });
 
-test("过程区留下已完成工具和进行中输出", () => {
+test("卡片不展示过程区，子代理仍保留", () => {
   const view = formatSnapshot(
     snap({
       state: { isStreaming: true, model: { provider: "x", id: "y" } },
@@ -89,25 +89,38 @@ test("过程区留下已完成工具和进行中输出", () => {
           status: "done",
           partialResult: "a.txt",
         },
-        {
-          toolCallId: "2",
-          toolName: "read",
-          args: { path: "a.txt" },
-          startedAt: 2,
-          status: "running",
-          partialResult: "hello world",
-        },
       ],
       subagentProgress: [{ progress: { id: "s1", label: "explore", percent: 0.4 } }],
     }),
     "omp",
     { showLeave: false },
   );
-  expect(view.markdown).toContain("**过程**");
-  expect(view.markdown).toContain("完成 `bash` ls");
-  expect(view.markdown).toContain("进行中 `read` a.txt");
-  expect(view.markdown).toContain("hello world");
+  expect(view.markdown).not.toContain("**过程**");
+  expect(view.markdown).not.toContain("`bash`");
   expect(view.markdown).toContain("explore 40%");
+});
+
+test("运行中标题显示已等待时长", () => {
+  const view = formatSnapshot(
+    snap({
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      turnStartedAt: 1_000,
+    }),
+    "omp",
+    { showLeave: false, now: 66_000 },
+  );
+  expect(view.title).toBe("运行中 · 1:05");
+  const hour = formatSnapshot(
+    snap({
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      turnStartedAt: 1_000,
+    }),
+    "omp",
+    { showLeave: false, now: 3_663_000 },
+  );
+  expect(hour.title).toBe("运行中 · 1:01:02");
+  const idle = formatSnapshot(snap(), "omp", { showLeave: false });
+  expect(idle.title).toBe("已接入 · omp");
 });
 
 test("RPC 空闲卡片有模型和思考按钮", () => {
@@ -197,6 +210,35 @@ test("新一轮卡片不带上一轮输出", () => {
   expect(view.markdown).not.toContain("previous answer");
   expect(view.streaming).toBe(true);
 });
+
+test("运行中但本轮还没回复时不画上一轮输出", () => {
+  const view = formatSnapshot(
+    snap({
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      streamingEnded: true,
+      streamingMessage: {
+        role: "assistant",
+        content: [{ type: "text", text: "previous answer" }],
+      },
+      entries: [
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "hi" }] },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+        },
+      ],
+    }),
+    "omp",
+    { showLeave: true },
+  );
+  expect(view.markdown).not.toContain("previous answer");
+  expect(view.streaming).toBe(true);
+  expect(view.title.startsWith("运行中")).toBe(true);
+});
+
 
 test("本轮助手回复才进输出", () => {
   const view = formatSnapshot(
