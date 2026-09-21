@@ -280,15 +280,17 @@ test("select 选项变成可点按钮并退出流式", () => {
   expect(view.markdown).toContain("请选择");
   expect(view.buttons.filter((b) => b.action === "ui")).toEqual([
     {
-      text: "方案A",
+      text: "1. 方案A",
       action: "ui",
       type: "primary",
+      width: "fill",
       payload: { reqId: "r1", value: "方案A" },
     },
     {
-      text: "方案B",
+      text: "2. 方案B",
       action: "ui",
       type: "primary",
+      width: "fill",
       payload: { reqId: "r1", value: "b" },
     },
   ]);
@@ -335,5 +337,69 @@ test("extractNumberedChoices 要连续从 1 起", () => {
   expect(extractNumberedChoices("1. a\n2. b\n3. c")).toEqual(["a", "b", "c"]);
   expect(extractNumberedChoices("1. a\n3. c")).toEqual([]);
   expect(extractNumberedChoices("only one\n1. a")).toEqual([]);
+});
+
+test("长选项通栏按钮，悬停看全文，payload 不截", () => {
+  const long = "用 TypeScript 重写整个模块并补齐边界测试和文档";
+  const view = formatSnapshot(
+    snap({
+      uiRequest: {
+        reqId: "r2",
+        method: "select",
+        title: "选方案",
+        options: [long, "短"],
+      },
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  const ui = view.buttons.filter((b) => b.action === "ui");
+  expect(ui[0]?.width).toBe("fill");
+  expect(ui[0]?.payload?.value).toBe(long);
+  expect(ui[0]?.text.startsWith("1. ")).toBe(true);
+  expect(ui[0]?.text.length).toBeLessThanOrEqual(40);
+  expect(ui[0]?.hoverTips).toContain(long);
+  expect(view.markdown).toContain(long);
+});
+
+test("超长输出进全文区并保留结尾", () => {
+  const output = `开头摘要。${"中".repeat(8000)}结论：选用方案乙。`;
+  const view = formatSnapshot(
+    snap({
+      entries: [
+        {
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "怎么做" }] },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: output }] },
+        },
+      ],
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.markdown).toContain("开头摘要");
+  expect(view.overflow?.title).toBe("全文（已截断）");
+  expect(view.overflow?.content).toContain("开头摘要");
+  expect(view.overflow?.content).toContain("结论：选用方案乙。");
+  expect(view.overflow?.content).toContain("中间省略");
+});
+
+test("运行中超长输出先留在正文，不提前出全文面板", () => {
+  const output = `流${"式".repeat(2000)}中`;
+  const view = formatSnapshot(
+    snap({
+      state: { isStreaming: true },
+      streamingMessage: { role: "assistant", content: [{ type: "text", text: output }] },
+      turnStartedAt: Date.now() - 1000,
+    }),
+    "omp",
+    { showLeave: false },
+  );
+  expect(view.streaming).toBe(true);
+  expect(view.overflow).toBeUndefined();
+  expect(view.markdown).toContain("流");
 });
 

@@ -12,6 +12,8 @@ export type CardButton = {
   action: string;
   type?: "primary" | "danger" | "default";
   payload?: Record<string, string>;
+  width?: "fill";
+  hoverTips?: string;
 };
 
 export type CardView = {
@@ -21,6 +23,7 @@ export type CardView = {
   buttons: CardButton[];
   streaming?: boolean;
   notify?: "done" | "ask";
+  overflow?: { title: string; content: string };
 };
 
 export type FormatSnapshotOpts = {
@@ -29,12 +32,49 @@ export type FormatSnapshotOpts = {
   now?: number;
 };
 
-const MAX_MD = 3500;
-const MAX_TEXT = 1200;
+/** 飞书卡片 JSON 约 30KB。中文按 3 字节估，正文+全文合计压在 ~8k 字内。 */
+const MAX_MD = 6000;
+const OUTPUT_STREAM = 4000;
+const OUTPUT_PREVIEW = 1200;
+const OUTPUT_OVERFLOW = 5000;
+const BTN_TEXT = 40;
+const HOVER_TEXT = 200;
+const OPTION_VALUE = 400;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max - 1)}…`;
+}
+
+/** 超长时留头尾，避免只看见开头、结论被裁掉。 */
+function clipKeepEnds(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const mark = "\n\n…(中间省略)…\n\n";
+  const budget = max - mark.length;
+  if (budget < 32) return truncate(text, max);
+  const head = Math.max(16, Math.floor(budget * 0.35));
+  return `${text.slice(0, head)}${mark}${text.slice(-(budget - head))}`;
+}
+
+function choiceButton(
+  index: number,
+  label: string,
+  action: string,
+  payload: Record<string, string>,
+): CardButton {
+  const full = `${index + 1}. ${label}`;
+  const text = truncate(full, BTN_TEXT);
+  const button: CardButton = {
+    text,
+    action,
+    type: "primary",
+    width: "fill",
+    payload,
+  };
+  if (full !== text || label.length > 16) {
+    button.hoverTips = truncate(full, HOVER_TEXT);
+  }
+  return button;
 }
 
 function modelLabel(state: GuestSnapshot["state"]): string {
@@ -133,7 +173,9 @@ export function extractNumberedChoices(text: string): string[] {
     if (!match) continue;
     const n = Number(match[1]);
     const body = match[2].trim();
-    if (n >= 1 && n <= 8 && body) items.set(n, truncate(body, 80));
+    if (n >= 1 && n <= 8 && body) {
+      items.set(n, body.length <= OPTION_VALUE ? body : body.slice(0, OPTION_VALUE));
+    }
   }
   if (items.size < 2) return [];
   const out: string[] = [];
@@ -261,10 +303,24 @@ export function formatSnapshot(
 
   const thinking = thinkingText(live);
   if (thinking) {
-    lines.push(`\n**思考**\n${truncate(thinking, 500)}`);
+    lines.push(`\n**思考**\n${truncate(thinking, 800)}`);
   }
+  let overflow: CardView["overflow"];
   if (output) {
-    lines.push(`\n**输出**\n${truncate(output, MAX_TEXT)}`);
+    if (!streaming && output.length > OUTPUT_PREVIEW) {
+      lines.push(`\n**输出**\n${output.slice(0, OUTPUT_PREVIEW)}…`);
+      const full = clipKeepEnds(output, OUTPUT_OVERFLOW);
+      overflow = {
+        title: full.length < output.length ? "全文（已截断）" : "全文",
+        content:
+          full.length < output.length
+            ? `${full}\n\n_已截断，完整内容在 omp 会话。_`
+            : full,
+      };
+    } else {
+      const capLen = streaming ? OUTPUT_STREAM : OUTPUT_PREVIEW;
+      lines.push(`\n**输出**\n${truncate(output, capLen)}`);
+    }
   }
 
   const choices = uiChoices(snap.uiRequest);
@@ -318,22 +374,19 @@ export function formatSnapshot(
     buttons.push({ text: "离开", action: "leave", type: "default" });
   }
   if (!snap.readOnly && snap.uiRequest && choices.length > 0) {
-    for (const choice of choices.slice(0, 8)) {
-      buttons.push({
-        text: truncate(choice.label, 20),
-        action: "ui",
-        type: "primary",
-        payload: { reqId: snap.uiRequest.reqId, value: choice.value },
-      });
+    for (const [i, choice] of choices.slice(0, 8).entries()) {
+      buttons.push(
+        choiceButton(i, choice.label, "ui", {
+          reqId: snap.uiRequest.reqId,
+          value: choice.value.length <= OPTION_VALUE ? choice.value : choice.value.slice(0, OPTION_VALUE),
+        }),
+      );
     }
   } else if (picks.length > 0) {
-    for (const option of picks.slice(0, 8)) {
-      buttons.push({
-        text: truncate(option, 20),
-        action: "pick",
-        type: "primary",
-        payload: { value: option },
-      });
+    for (const [i, option] of picks.slice(0, 8).entries()) {
+      buttons.push(
+        choiceButton(i, option, "pick", { value: option }),
+      );
     }
   }
 
@@ -344,6 +397,7 @@ export function formatSnapshot(
     buttons,
     streaming,
     notify: asking ? "ask" : streaming ? undefined : "done",
+    overflow,
   };
 }
 

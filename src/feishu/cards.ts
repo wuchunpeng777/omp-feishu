@@ -8,7 +8,8 @@ export function cardStructure(view: CardView): string {
   const buttons = view.buttons
     .map((button) => `${button.action}:${button.text}`)
     .join(",");
-  return `${view.title}\n${view.template}\n${buttons}`;
+  const overflow = view.overflow ? `\n${view.overflow.title}:${view.overflow.content.length}` : "";
+  return `${view.title}\n${view.template}\n${buttons}${overflow}`;
 }
 
 /** 结构没变、正文是前缀加长、且仍在流式 → 走打字机，否则整卡覆盖。 */
@@ -30,6 +31,15 @@ export function buildCard(view: CardView): Record<string, unknown> {
       text: { tag: "lark_md", content: view.markdown },
     },
   ];
+  if (view.overflow?.content) {
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**${view.overflow.title}**\n${view.overflow.content}`,
+      },
+    });
+  }
   if (actions.length > 0) {
     elements.push({ tag: "action", actions });
   }
@@ -52,6 +62,9 @@ export function buildCardV2(view: CardView): Record<string, unknown> {
       element_id: STREAM_MD_ID,
     },
   ];
+  if (view.overflow?.content) {
+    elements.push(overflowPanel(view.overflow));
+  }
   view.buttons.forEach((button, i) => {
     elements.push(buttonElementV2(button, i));
   });
@@ -84,9 +97,11 @@ function buttonValue(button: CardButton): Record<string, string> {
 }
 
 function buttonElementV1(button: CardButton): Record<string, unknown> {
+  const text =
+    button.text.length <= 20 ? button.text : `${button.text.slice(0, 19)}…`;
   return {
     tag: "button",
-    text: { tag: "plain_text", content: button.text },
+    text: { tag: "plain_text", content: text },
     type: button.type ?? "default",
     value: buttonValue(button),
   };
@@ -97,12 +112,39 @@ function buttonElementV2(
   index: number,
 ): Record<string, unknown> {
   const value = buttonValue(button);
-  return {
+  const el: Record<string, unknown> = {
     tag: "button",
     element_id: `btn_${index}`,
     text: { tag: "plain_text", content: button.text },
     type: button.type ?? "default",
     behaviors: [{ type: "callback", value }],
+  };
+  if (button.width === "fill") el.width = "fill";
+  if (button.hoverTips) {
+    el.hover_tips = { tag: "plain_text", content: button.hoverTips };
+  }
+  return el;
+}
+
+function overflowPanel(overflow: { title: string; content: string }): Record<string, unknown> {
+  return {
+    tag: "collapsible_panel",
+    element_id: "overflow_md",
+    expanded: true,
+    header: {
+      title: { tag: "markdown", content: `**${overflow.title}**` },
+      vertical_align: "center",
+      icon: {
+        tag: "standard_icon",
+        token: "down-small-ccm_outlined",
+        size: "16px 16px",
+      },
+      icon_position: "right",
+      icon_expanded_angle: -180,
+    },
+    border: { color: "grey", corner_radius: "5px" },
+    padding: "8px",
+    elements: [{ tag: "markdown", content: overflow.content }],
   };
 }
 
