@@ -141,6 +141,13 @@ function parseCardValue(raw: unknown): Record<string, string> {
   return out;
 }
 
+function cardAckToast(action: string): string {
+  if (action === "attach") return "正在接入";
+  if (action === "leave") return "已离开";
+  if (action === "ui" || action === "pick") return "已选择";
+  return "已处理";
+}
+
 
 export function createFeishu(config: AppConfig): FeishuApi {
   const domain =
@@ -450,21 +457,22 @@ export function createFeishu(config: AppConfig): FeishuApi {
             return { toast: { type: "error", content: "回调数据不完整" } };
           }
           console.log("收到卡片", chatId, value.action);
-          await onAction({
-            chatId,
-            openId: rec.operator?.open_id ?? "",
-            action: value.action,
-            payload: value,
+          // 飞书卡片回调 3 秒内不返回，客户端显示 timeout 并重试。
+          // 开启 collab 要注入按键并轮询，不能堵在这次响应里。
+          void Promise.resolve(
+            onAction({
+              chatId,
+              openId: rec.operator?.open_id ?? "",
+              action: value.action,
+              payload: value,
+            }),
+          ).catch((err) => {
+            console.error("处理卡片失败", err);
           });
           return {
             toast: {
               type: "info",
-              content:
-                value.action === "leave"
-                  ? "已离开"
-                  : value.action === "ui" || value.action === "pick"
-                    ? "已选择"
-                    : "已处理",
+              content: cardAckToast(value.action),
             },
           };
         } catch (err) {
