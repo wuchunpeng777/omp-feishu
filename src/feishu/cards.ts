@@ -3,13 +3,27 @@
 import type { CardButton, CardView } from "../bridge/format.ts";
 
 export const STREAM_MD_ID = "md_body";
+export const CLOCK_ID = "md_clock";
+export const ELAPSED_ID = "elapsed";
+
+const ELAPSED = / · (\d+:\d{2}(?::\d{2})?)$/;
+
+/** `运行中 · 1:05` / `运行中 · 1:01:02` → 时长；其它标题没有。 */
+export function elapsedOf(title: string): string {
+  return ELAPSED.exec(title)?.[1] ?? "";
+}
+
+/** 时长每秒变，不能算进结构，否则打字机会被整卡覆盖打断。 */
+function stableTitle(title: string): string {
+  return title.replace(ELAPSED, "");
+}
 
 export function cardStructure(view: CardView): string {
   const buttons = view.buttons
     .map((button) => `${button.action}:${button.text}`)
     .join(",");
   const overflow = view.overflow ? `\n${view.overflow.title}:${view.overflow.content.length}` : "";
-  return `${view.title}\n${view.template}\n${buttons}${overflow}`;
+  return `${stableTitle(view.title)}\n${view.template}\n${buttons}${overflow}`;
 }
 
 /** 结构没变、正文是前缀加长、且仍在流式 → 走打字机，否则整卡覆盖。 */
@@ -55,19 +69,43 @@ export function buildCard(view: CardView): Record<string, unknown> {
 
 export function buildCardV2(view: CardView): Record<string, unknown> {
   const streaming = view.streaming === true;
-  const elements: unknown[] = [
-    {
+  const clock = streaming ? elapsedOf(view.title) : "";
+  const elements: unknown[] = [];
+  if (clock) {
+    elements.push({
       tag: "markdown",
-      content: view.markdown || "…",
-      element_id: STREAM_MD_ID,
-    },
-  ];
+      content: `**${view.title}**`,
+      element_id: CLOCK_ID,
+    });
+  }
+  elements.push({
+    tag: "markdown",
+    content: view.markdown || "…",
+    element_id: STREAM_MD_ID,
+  });
   if (view.overflow?.content) {
     elements.push(overflowPanel(view.overflow));
   }
   view.buttons.forEach((button, i) => {
     elements.push(buttonElementV2(button, i));
   });
+  const header: Record<string, unknown> = {
+    title: {
+      tag: "plain_text",
+      content: clock ? stableTitle(view.title) : view.title,
+    },
+    template: view.template,
+  };
+  if (clock) {
+    header.text_tag_list = [
+      {
+        tag: "text_tag",
+        element_id: ELAPSED_ID,
+        text: { tag: "plain_text", content: clock },
+        color: "orange",
+      },
+    ];
+  }
   return {
     schema: "2.0",
     config: {
@@ -80,10 +118,7 @@ export function buildCardV2(view: CardView): Record<string, unknown> {
         print_strategy: "fast",
       },
     },
-    header: {
-      title: { tag: "plain_text", content: view.title },
-      template: view.template,
-    },
+    header,
     body: { elements },
   };
 }

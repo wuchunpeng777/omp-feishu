@@ -8,6 +8,9 @@ import {
   cardContent as encodeCard,
   cardContentV2,
   cardStructure,
+  CLOCK_ID,
+  ELAPSED_ID,
+  elapsedOf,
   STREAM_MD_ID,
 } from "./cards.ts";
 
@@ -64,6 +67,8 @@ export type LiveCard = {
   streaming: boolean;
   markdown: string;
   structure: string;
+  /** 上次推到卡片上的时长，例如 `1:05`。空表示当前没有时长。 */
+  clock?: string;
 };
 
 export type MessageHandler = (msg: IncomingMessage) => Promise<void> | void;
@@ -122,6 +127,18 @@ function kitFailed(res: { code?: number; msg?: string }, label: string): boolean
 
 function kitDenied(res: { code?: number }): boolean {
   return res.code === 300311 || res.code === 99991663;
+}
+
+function kitErrorBody(err: unknown): { code?: number; msg?: string } | undefined {
+  if (!err || typeof err !== "object" || !("response" in err)) return undefined;
+  const response = err.response;
+  if (!response || typeof response !== "object" || !("data" in response)) return undefined;
+  const data = response.data;
+  if (!data || typeof data !== "object") return undefined;
+  const code = "code" in data && typeof data.code === "number" ? data.code : undefined;
+  const msg = "msg" in data && typeof data.msg === "string" ? data.msg : undefined;
+  if (code === undefined && msg === undefined) return undefined;
+  return { code, msg };
 }
 
 function parseCardValue(raw: unknown): Record<string, string> {
@@ -266,6 +283,7 @@ export function createFeishu(config: AppConfig): FeishuApi {
       streaming: view.streaming === true,
       markdown: view.markdown,
       structure: cardStructure(view),
+      clock: elapsedOf(view.title),
       ...extra,
     };
   }
@@ -297,17 +315,38 @@ export function createFeishu(config: AppConfig): FeishuApi {
     return res.data?.message_id;
   }
 
+  async function kitCall(
+    run: () => Promise<{ code?: number; msg?: string }>,
+    label: string,
+  ): Promise<boolean> {
+    try {
+      const res = await run();
+      if (kitDenied(res)) kitDisabled = true;
+      return !kitFailed(res, label);
+    } catch (err) {
+      const data = kitErrorBody(err);
+      if (data) {
+        if (kitDenied(data)) kitDisabled = true;
+        return !kitFailed(data, label);
+      }
+      console.error(label, err);
+      return false;
+    }
+  }
+
   async function streamMarkdown(
     cardId: string,
     markdown: string,
     sequence: number,
   ): Promise<boolean> {
-    const res = await client.cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: STREAM_MD_ID },
-      data: { content: markdown || "…", sequence },
-    });
-    if (kitDenied(res)) kitDisabled = true;
-    return !kitFailed(res, "CardKit 流式失败");
+    return kitCall(
+      () =>
+        client.cardkit.v1.cardElement.content({
+          path: { card_id: cardId, element_id: STREAM_MD_ID },
+          data: { content: markdown || "…", sequence },
+        }),
+      "CardKit 流式失败",
+    );
   }
 
   async function updateKitCard(
@@ -315,15 +354,17 @@ export function createFeishu(config: AppConfig): FeishuApi {
     view: CardView,
     sequence: number,
   ): Promise<boolean> {
-    const res = await client.cardkit.v1.card.update({
-      path: { card_id: cardId },
-      data: {
-        sequence,
-        card: { type: "card_json", data: cardContentV2(view) },
-      },
-    });
-    if (kitDenied(res)) kitDisabled = true;
-    return !kitFailed(res, "CardKit 全量更新失败");
+    return kitCall(
+      () =>
+        client.cardkit.v1.card.update({
+          path: { card_id: cardId },
+          data: {
+            sequence,
+            card: { type: "card_json", data: cardContentV2(view) },
+          },
+        }),
+      "CardKit 全量更新失败",
+    );
   }
 
   async function setStreamingMode(
@@ -331,15 +372,69 @@ export function createFeishu(config: AppConfig): FeishuApi {
     streaming: boolean,
     sequence: number,
   ): Promise<boolean> {
-    const res = await client.cardkit.v1.card.settings({
-      path: { card_id: cardId },
-      data: {
-        sequence,
-        settings: JSON.stringify({ config: { streaming_mode: streaming } }),
-      },
-    });
-    if (kitDenied(res)) kitDisabled = true;
-    return !kitFailed(res, "CardKit 切换流式失败");
+    return kitCall(
+      () =>
+        client.cardkit.v1.card.settings({
+          path: { card_id: cardId },
+          data: {
+            sequence,
+            settings: JSON.stringify({ config: { streaming_mode: streaming } }),
+          },
+        }),
+      "CardKit 切换流式失败",
+    );
+  }
+
+  /** 时长走元素和摘要，不整卡覆盖。流式中整卡更新会 300317，标题就停住。 */
+  async function refreshClock(
+    cardId: string,
+    view: CardView,
+    prev: string | undefined,
+    sequence: number,
+  ): Promise<number> {
+    const clock = elapsedOf(view.title);
+    if (!clock || clock === prev) return sequence;
+    sequence += 1;
+    await kitCall(
+      () =>
+        client.cardkit.v1.cardElement.content({
+          path: { card_id: cardId, element_id: CLOCK_ID },
+          data: { content: `**${view.title}**`, sequence },
+        }),
+      "CardKit 时长失败",
+    );
+    sequence += 1;
+    await kitCall(
+      () =>
+        client.cardkit.v1.cardElement.update({
+          path: { card_id: cardId, element_id: ELAPSED_ID },
+          data: {
+            sequence,
+            element: JSON.stringify({
+              tag: "text_tag",
+              element_id: ELAPSED_ID,
+              text: { tag: "plain_text", content: clock },
+              color: "orange",
+            }),
+          },
+        }),
+      "CardKit 标题时长失败",
+    );
+    sequence += 1;
+    await kitCall(
+      () =>
+        client.cardkit.v1.card.settings({
+          path: { card_id: cardId },
+          data: {
+            sequence,
+            settings: JSON.stringify({
+              config: { streaming_mode: true, summary: { content: view.title } },
+            }),
+          },
+        }),
+      "CardKit 摘要失败",
+    );
+    return sequence;
   }
 
   async function pushLiveCard(
@@ -367,15 +462,25 @@ export function createFeishu(config: AppConfig): FeishuApi {
     }
 
     let sequence = live.sequence;
+    const stillStreaming = live.streaming && view.streaming === true;
+    const structureSame = cardStructure(view) === live.structure;
     if (canTypewriter(live, view)) {
       sequence += 1;
       if (await streamMarkdown(live.cardId, view.markdown, sequence)) {
+        sequence = await refreshClock(live.cardId, view, live.clock, sequence);
         return snapshot(view, {
           cardId: live.cardId,
           messageId: live.messageId,
           sequence,
         });
       }
+    } else if (stillStreaming && structureSame && view.markdown === live.markdown) {
+      sequence = await refreshClock(live.cardId, view, live.clock, sequence);
+      return snapshot(view, {
+        cardId: live.cardId,
+        messageId: live.messageId,
+        sequence,
+      });
     }
     if (live.streaming !== (view.streaming === true)) {
       sequence += 1;
@@ -383,6 +488,14 @@ export function createFeishu(config: AppConfig): FeishuApi {
     }
     sequence += 1;
     if (await updateKitCard(live.cardId, view, sequence)) {
+      return snapshot(view, {
+        cardId: live.cardId,
+        messageId: live.messageId,
+        sequence,
+      });
+    }
+
+    if (stillStreaming) {
       return snapshot(view, {
         cardId: live.cardId,
         messageId: live.messageId,
