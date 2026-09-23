@@ -208,17 +208,19 @@ export function formatSnapshot(
     ? "错误"
     : asking
       ? "待选择"
-      : snap.status === "live"
-        ? streaming
-          ? "运行中"
-          : "已接入"
-        : snap.status === "waiting"
-          ? "等待主机"
-          : snap.status === "reconnecting"
-            ? "重连中"
-            : snap.status === "connecting"
-              ? "连接中"
-              : "已断开";
+      : streaming
+        ? "运行中"
+        : snap.status === "live"
+          ? "已接入"
+          : snap.status === "left"
+            ? "已离开"
+            : snap.status === "waiting"
+              ? "等待主机"
+              : snap.status === "reconnecting"
+                ? "重连中"
+                : snap.status === "connecting"
+                  ? "连接中"
+                  : "已断开";
 
   const template: CardView["template"] = snap.error
     ? "red"
@@ -228,7 +230,7 @@ export function formatSnapshot(
         ? "orange"
         : snap.status === "live"
           ? "green"
-          : snap.status === "ended"
+          : snap.status === "ended" || snap.status === "left"
             ? "grey"
             : "blue";
 
@@ -370,7 +372,7 @@ export function formatSnapshot(
     buttons.push({ text: "模型", action: "models", type: "default" });
     buttons.push({ text: "思考", action: "think", type: "default" });
   }
-  if (opts?.showLeave !== false) {
+  if (opts?.showLeave !== false && snap.status !== "left") {
     buttons.push({ text: "离开", action: "leave", type: "default" });
   }
   if (!snap.readOnly && snap.uiRequest && choices.length > 0) {

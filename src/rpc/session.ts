@@ -112,6 +112,8 @@ export class RpcSession {
       this.streamingEnded = false;
       this.uiRequest = undefined;
       this.turnStartedAt = Date.now();
+    } else {
+      this.turnStartedAt ??= Date.now();
     }
     this.entries = [
       ...this.entries,
@@ -132,6 +134,7 @@ export class RpcSession {
       const data = res.data as Record<string, unknown> | undefined;
       if (data?.agentInvoked === false) {
         this.awaitingTurn = false;
+        this.turnStartedAt = undefined;
         this.state = { ...this.state, isStreaming: false };
         this.emit();
       }
@@ -314,6 +317,8 @@ export class RpcSession {
           : this.state?.thinkingLevel,
       context: usage,
     };
+    if (data.isStreaming === true) this.turnStartedAt ??= Date.now();
+    else if (!this.awaitingTurn) this.turnStartedAt = undefined;
   }
 
   private onFrame(frame: RpcFrame): void {
@@ -324,6 +329,8 @@ export class RpcSession {
         if (this.state?.isStreaming !== true) {
           this.tools = new Map();
           this.progress = new Map();
+          this.turnStartedAt = Date.now();
+        } else {
           this.turnStartedAt ??= Date.now();
         }
         this.state = { ...this.state, isStreaming: true };
@@ -333,6 +340,7 @@ export class RpcSession {
         if (frame.isTerminal === false || frame.willRetry === true) break;
         this.state = { ...this.state, isStreaming: false };
         this.awaitingTurn = false;
+        this.turnStartedAt = undefined;
         for (const [id, tool] of this.tools) {
           if (tool.status !== "done") this.tools.set(id, { ...tool, status: "done" });
         }
@@ -349,10 +357,12 @@ export class RpcSession {
       case "agent_settled":
         this.state = { ...this.state, isStreaming: false };
         this.awaitingTurn = false;
+        this.turnStartedAt = undefined;
         break;
       case "prompt_result":
         if (frame.agentInvoked !== true) {
           this.awaitingTurn = false;
+          this.turnStartedAt = undefined;
           this.state = { ...this.state, isStreaming: false };
         }
         break;
@@ -553,6 +563,7 @@ export class RpcSession {
 
   private failTurn(message: string, opts: { endSession: boolean }): void {
     this.awaitingTurn = false;
+    this.turnStartedAt = undefined;
     this.state = { ...this.state, isStreaming: false };
     this.noteError(message);
     if (opts.endSession) this.status = "ended";

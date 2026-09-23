@@ -123,6 +123,37 @@ test("运行中标题显示已等待时长", () => {
   expect(idle.title).toBe("已接入 · omp");
 });
 
+test("快照未完成时运行中标题仍是时长", () => {
+  const view = formatSnapshot(
+    snap({
+      status: "waiting",
+      state: { isStreaming: true, model: { provider: "x", id: "y" } },
+      turnStartedAt: 1_000,
+      header: { title: "Fix 01 Trail Fragment Display", cwd: "/tmp" },
+    }),
+    "omp",
+    { showLeave: false, now: 66_000 },
+  );
+  expect(view.title).toBe("运行中 · 1:05");
+  expect(view.streaming).toBe(true);
+});
+
+test("主动离开是灰色已离开而不是错误", () => {
+  const view = formatSnapshot(
+    snap({
+      status: "left",
+      error: undefined,
+      state: { isStreaming: false, model: { provider: "x", id: "y" } },
+      header: { title: "Fix 01 Trail Fragment Display", cwd: "/tmp" },
+    }),
+    "Fix 01 Trail Fragment Display",
+  );
+  expect(view.title.startsWith("已离开")).toBe(true);
+  expect(view.template).toBe("grey");
+  expect(view.markdown).not.toContain("**断开**");
+  expect(view.buttons.map((button) => button.action)).not.toContain("leave");
+});
+
 test("RPC 空闲卡片有模型和思考按钮", () => {
   const view = formatSnapshot(snap(), "omp", {
     showLeave: false,

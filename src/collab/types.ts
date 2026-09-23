@@ -7,7 +7,8 @@ export type GuestStatus =
   | "waiting"
   | "live"
   | "reconnecting"
-  | "ended";
+  | "ended"
+  | "left";
 
 export type CollabState = {
   isStreaming?: boolean;

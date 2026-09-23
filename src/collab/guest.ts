@@ -66,7 +66,7 @@ export class CollabGuest {
   }
 
   connect(): void {
-    if (this.status === "ended") {
+    if (this.status === "ended" || this.status === "left") {
       this.status = "connecting";
       this.error = undefined;
       this.emit();
@@ -83,7 +83,15 @@ export class CollabGuest {
   close(): void {
     this.clearWelcome();
     this.clearSnapshot();
+    const first = this.status !== "ended" && this.status !== "left";
+    if (first) {
+      this.status = "left";
+      this.error = undefined;
+      this.turnStartedAt = undefined;
+      if (this.state?.isStreaming) this.state = { ...this.state, isStreaming: false };
+    }
     this.transport.close();
+    if (first) this.emit();
   }
 
   subscribe(listener: GuestListener): () => void {
@@ -125,6 +133,8 @@ export class CollabGuest {
       this.uiRequest = undefined;
       this.uiQueue = [];
       this.turnStartedAt = Date.now();
+    } else {
+      this.turnStartedAt ??= Date.now();
     }
     this.pendingUserText = text;
     this.entries = [
@@ -153,6 +163,12 @@ export class CollabGuest {
     this.transport.send({ t: "agent-cmd", cmd, agentId, text });
   }
 
+  /** 运行中补计时起点；结束清掉，避免下一轮沿用上一轮。 */
+  private noteStreaming(streaming: boolean): void {
+    if (streaming) this.turnStartedAt ??= Date.now();
+    else this.turnStartedAt = undefined;
+  }
+
   private onSocketOpen(): void {
     this.transport.send({
       t: "hello",
@@ -166,7 +182,7 @@ export class CollabGuest {
 
   private onSocketClose(reason: string, retryable: boolean): void {
     this.clearSnapshot();
-    if (this.status === "ended") return;
+    if (this.status === "ended" || this.status === "left") return;
     if (retryable) {
       this.status = "reconnecting";
       this.emit();
@@ -176,7 +192,7 @@ export class CollabGuest {
   }
 
   private end(reason: string): void {
-    if (this.status === "ended") return;
+    if (this.status === "ended" || this.status === "left") return;
     this.clearWelcome();
     this.clearSnapshot();
     this.status = "ended";
@@ -225,6 +241,7 @@ export class CollabGuest {
         if (frame.entryCount === 0) this.clearSnapshot();
         else this.armSnapshot();
         this.error = undefined;
+        this.noteStreaming(this.state?.isStreaming === true);
         break;
       }
       case "snapshot-chunk": {
@@ -276,6 +293,7 @@ export class CollabGuest {
             this.streamingEnded = false;
           }
         }
+        this.noteStreaming(this.state?.isStreaming === true);
         break;
       case "agents":
         this.agents = Array.isArray(frame.agents) ? [...frame.agents] : [];
@@ -392,6 +410,8 @@ export class CollabGuest {
           this.progress = new Map();
           this.streamingMessage = undefined;
           this.streamingEnded = false;
+          this.turnStartedAt = Date.now();
+        } else {
           this.turnStartedAt ??= Date.now();
         }
         if (this.state) this.state = { ...this.state, isStreaming: true };
@@ -400,6 +420,7 @@ export class CollabGuest {
       case "agent_end":
         if (this.state) this.state = { ...this.state, isStreaming: false };
         else this.state = { isStreaming: false };
+        this.turnStartedAt = undefined;
         for (const [id, tool] of this.tools) {
           if (tool.status !== "done") this.tools.set(id, { ...tool, status: "done" });
         }
