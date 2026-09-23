@@ -1,6 +1,6 @@
 {
   "name": "omp-feishu",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "description": "飞书里用 omp：流式卡片、切模型/思考、后台常驻，也可挂本机 TUI",
