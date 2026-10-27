@@ -515,6 +515,7 @@ export const HELP_TEXT = `飞书里直接用 omp（A），也可以挂本机 TUI
 - \`/new [名称]\` 创建独立会话群
 - \`/chats [页码]\` 列出我的会话群，点击打开或重新加入
 - \`/reset\` 在当前窗口重置 omp 上下文
+- \`/close\` 确认后关闭当前会话并解散群（保留本机历史）
 - \`/cwd <目录>\` 换工作目录
 - \`/model [名称]\` 查看 / 切换模型
 - \`/think [off|low|medium|high|max|auto]\` 思考强度

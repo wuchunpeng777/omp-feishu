@@ -59,6 +59,11 @@ export class Bridge {
   private readonly startingRpc = new Map<string, Promise<RpcBinding>>();
   private readonly store: ChatStore;
   private readonly groups: GroupStore;
+  private readonly closing = new Set<string>();
+  private readonly closed = new Set<string>();
+  private readonly closeRequests = new Map<string, {
+    sourceChatId: string; groupId: string; ownerOpenId: string; expiresAt: number;
+  }>();
   private readonly creating = new Map<string, Promise<void>>();
 
   constructor(
@@ -98,6 +103,7 @@ export class Bridge {
     const text = msg.text.trim();
     if (!text) return;
     const managed = group ? await this.groups.get(msg.chatId) : undefined;
+    if (managed?.closedAt || this.closing.has(msg.chatId) || this.closed.has(msg.chatId)) return;
     if (managed && managed.ownerOpenId !== msg.openId) {
       await this.feishu.sendText(msg.chatId, "这个会话群只接受创建者的指令。");
       return;
@@ -179,8 +185,18 @@ export class Bridge {
       mentioned: true,
     };
     const managed = await this.groups.get(action.chatId);
+    if (managed?.closedAt || this.closing.has(action.chatId) || this.closed.has(action.chatId)) return;
     if (managed && managed.ownerOpenId !== action.openId) return;
     switch (action.action) {
+      case "close_group":
+        await this.requestClose(fake, action.payload.groupId ?? "");
+        break;
+      case "close_confirm":
+        await this.confirmClose(fake, action.payload.token ?? "", false);
+        break;
+      case "close_cancel":
+        await this.confirmClose(fake, action.payload.token ?? "", true);
+        break;
       case "groups":
         await this.sendGroups(fake, action.payload.page ?? "1");
         break;
@@ -268,6 +284,9 @@ export class Bridge {
         break;
       case "chats":
         await this.sendGroups(msg, arg);
+        break;
+      case "close":
+        await this.requestClose(msg, msg.chatId);
         break;
       case "reset":
         await this.newRpc(msg.chatId);
@@ -361,6 +380,7 @@ export class Bridge {
         this.config.ompBin,
       );
       await this.leaveCollab(msg.chatId, false);
+      if (this.closing.has(msg.chatId) || this.closed.has(msg.chatId)) throw new Error("会话正在关闭或已关闭。");
       const guest = connectGuest(link.url, this.config.displayName);
       const binding: CollabBinding = {
         kind: "collab",
@@ -410,12 +430,71 @@ export class Bridge {
 
   private async joinGroup(msg: IncomingMessage, groupId: string): Promise<void> {
     const group = await this.groups.get(groupId);
-    if (!group || group.ownerOpenId !== msg.openId) throw new Error("找不到你创建的会话群。");
+    if (!group || group.closedAt || this.closing.has(groupId) || group.ownerOpenId !== msg.openId) throw new Error("找不到你创建的可用会话群。");
     await this.feishu.joinSessionGroup(group.chatId, msg.openId);
     await this.feishu.sendCard(msg.chatId, {
       title: "已加入会话群", template: "green", markdown: "点击下方按钮打开会话。",
       buttons: [{ text: "打开会话群", action: "open_group", url: groupUrl(group.chatId, this.config.domain) }],
     });
+  }
+
+  private async requestClose(msg: IncomingMessage, groupId: string): Promise<void> {
+    const group = await this.groups.get(groupId);
+    if (!group || group.closedAt || group.ownerOpenId !== msg.openId) {
+      throw new Error("只能关闭自己通过 /new 创建的会话群；私聊或普通群不能解散。");
+    }
+    for (const [token, request] of this.closeRequests) {
+      if (request.expiresAt < Date.now() || request.groupId === groupId) this.closeRequests.delete(token);
+    }
+    const token = randomUUID();
+    this.closeRequests.set(token, {
+      sourceChatId: msg.chatId, groupId, ownerOpenId: msg.openId, expiresAt: Date.now() + 5 * 60_000,
+    });
+    await this.feishu.sendCard(msg.chatId, {
+      title: `确认关闭 ${group.name} 并解散群？`, template: "red",
+      markdown: "确认后将停止这个群的 omp 会话进程，解散飞书群并从会话列表移除。群聊天记录不会保留，电脑上的 omp 历史文件保留。若已接入电脑 TUI，只断开接入，不终止共享的 TUI。确认按钮 5 分钟内有效。",
+      buttons: [
+        { text: "确认关闭并解散群", action: "close_confirm", type: "danger", payload: { token } },
+        { text: "取消", action: "close_cancel", payload: { token } },
+      ],
+    });
+  }
+
+  private async confirmClose(msg: IncomingMessage, token: string, cancel: boolean): Promise<void> {
+    const request = this.closeRequests.get(token);
+    if (!request || request.expiresAt < Date.now() || request.sourceChatId !== msg.chatId || request.ownerOpenId !== msg.openId) {
+      throw new Error("关闭确认已失效，请重新发送 /close 或点击列表中的关闭按钮。");
+    }
+    this.closeRequests.delete(token);
+    if (cancel) {
+      await this.feishu.sendText(msg.chatId, "已取消关闭。");
+      return;
+    }
+    const group = await this.groups.get(request.groupId);
+    if (!group || group.closedAt || group.ownerOpenId !== msg.openId || this.closing.has(group.chatId)) return;
+    this.closing.add(group.chatId);
+    try {
+      // 等待正在启动的 RPC 完成，避免解散群后留下无人管理的进程。
+      await this.startingRpc.get(group.chatId)?.catch(() => {});
+      await this.leaveCollab(group.chatId, false);
+      const rpc = this.rpc.get(group.chatId);
+      if (rpc) {
+        this.stopPump(rpc);
+        // 先通知 omp 取消当前轮，再关闭 RPC 进程；已退出时仍继续清理。
+        try { rpc.session.abort(); } catch {}
+        await rpc.session.dispose();
+        this.rpc.delete(group.chatId);
+      }
+      await this.feishu.dissolveSessionGroup(group.chatId);
+      this.closed.add(group.chatId);
+      // 留下关闭标记防止迟到消息重新启动会话；chats.json 保留历史文件索引。
+      await this.groups.close(group.chatId);
+      if (msg.chatId !== group.chatId) await this.feishu.sendText(msg.chatId, "会话已关闭，群已解散。");
+    } catch (err) {
+      throw new Error(`关闭未全部完成：${err instanceof Error ? err.message : String(err)}。群未成功解散时会保留在列表中，可重新确认关闭。`);
+    } finally {
+      this.closing.delete(group.chatId);
+    }
   }
 
   private async createGroup(msg: IncomingMessage, arg: string): Promise<void> {
@@ -429,7 +508,8 @@ export class Bridge {
   }
 
   private async doCreateGroup(msg: IncomingMessage, arg: string, requestId: string): Promise<void> {
-    let record = (await this.groups.list(msg.openId)).find(g => g.requestId === requestId);
+    let record = await this.groups.findRequest(msg.openId, requestId);
+    if (record?.closedAt) throw new Error("这条新建请求对应的会话已经关闭，请发送新的 /new 命令。");
     if (!record) {
       const title = arg.trim() || "新会话";
       if (title.length > 60 || /[\r\n]/.test(title)) throw new Error("会话名称请使用不超过 60 字的单行文字。");
@@ -633,6 +713,7 @@ export class Bridge {
   }
 
   private async ensureRpc(chatId: string): Promise<RpcBinding> {
+    if (this.closing.has(chatId) || this.closed.has(chatId)) throw new Error("会话正在关闭或已关闭。");
     const pending = this.startingRpc.get(chatId);
     if (pending) return pending;
     const operation = this.startRpc(chatId);
@@ -681,6 +762,7 @@ export class Bridge {
     showLeave: boolean,
     label: string,
   ): void {
+    if (this.closing.has(chatId) || this.closed.has(chatId)) return;
     binding.lastSnap = snap;
     binding.lastShowLeave = showLeave;
     binding.lastLabel = label;
@@ -763,6 +845,7 @@ export class Bridge {
     binding: CardPump,
     view: CardView,
   ): Promise<void> {
+    if (this.closing.has(chatId) || this.closed.has(chatId)) return;
     const gen = binding.liveGen;
     const wasStreaming = binding.live?.streaming === true;
     const key = `${view.title}\n${view.markdown}\n${view.buttons.map((b) => b.text).join(",")}`;
@@ -816,6 +899,8 @@ function parseCommand(
     new: "new",
     新开: "new",
     新建: "new",
+    close: "close",
+    关闭: "close",
     reset: "reset",
     重置: "reset",
     cwd: "cwd",

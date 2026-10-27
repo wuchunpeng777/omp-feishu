@@ -57,3 +57,17 @@ test("列表同时生成跳转和加入按钮，旧卡片每个容器不超过�
   expect(buttons[0]?.behaviors?.[0]?.type).toBe("open_url");
   expect(buttons[1]?.behaviors?.[0]?.type).toBe("callback");
 });
+
+test("关闭标记重启后保留，列表不再显示且旧新建请求仍可追溯", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "omp-groups-"));
+  const file = join(dir, "groups.json");
+  const store = new GroupStore(file);
+  await store.put(record(1));
+  await store.put(record(2));
+  await store.close("oc_1");
+  const again = new GroupStore(file);
+  expect((await again.list()).map(g => g.chatId)).toEqual(["oc_2"]);
+  expect((await again.get("oc_1"))?.closedAt).toBeDefined();
+  expect((await again.findRequest("ou_me", "req_1"))?.closedAt).toBeDefined();
+  expect(await again.findRequest("ou_other", "req_1")).toBeUndefined();
+});

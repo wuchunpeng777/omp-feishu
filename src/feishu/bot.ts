@@ -75,6 +75,7 @@ export type MessageHandler = (msg: IncomingMessage) => Promise<void> | void;
 export type ActionHandler = (action: CardAction) => Promise<void> | void;
 
 export type FeishuApi = {
+  dissolveSessionGroup: (chatId: string) => Promise<void>;
   createSessionGroup: (name: string, openId: string, uuid: string) => Promise<string>;
   joinSessionGroup: (chatId: string, openId: string) => Promise<void>;
   sendCard: (chatId: string, view: CardView) => Promise<string | undefined>;
@@ -183,6 +184,14 @@ export function createFeishu(config: AppConfig): FeishuApi {
     loggerLevel: Lark.LoggerLevel.info,
   };
   let kitDisabled = false;
+
+  async function dissolveSessionGroup(chatId: string): Promise<void> {
+    const res = await client.im.v1.chat.delete({ path: { chat_id: chatId } });
+    // 群已经解散视为成功，便于失败后的清理重试。
+    if (res.code !== 0 && res.code !== 232009) {
+      throw new Error(`解散群失败：${res.code} ${res.msg}；请检查 im:chat:delete 权限，以及机器人是否为群主或具有 im:chat:operate_as_owner 权限的创建者。`);
+    }
+  }
 
   async function createSessionGroup(name: string, openId: string, uuid: string): Promise<string> {
     const res = await client.im.v1.chat.create({
@@ -638,5 +647,5 @@ export function createFeishu(config: AppConfig): FeishuApi {
     }
   }
 
-  return { createSessionGroup, joinSessionGroup, sendCard, replyCard, patchCard, pushLiveCard, sendText, notifyDone, start };
+  return { dissolveSessionGroup, createSessionGroup, joinSessionGroup, sendCard, replyCard, patchCard, pushLiveCard, sendText, notifyDone, start };
 }

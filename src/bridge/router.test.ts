@@ -18,6 +18,7 @@ async function fixture() {
   const config: AppConfig = { appId: "app", appSecret: "secret", domain: "feishu",
     allowOpenIds: new Set(), ompBin: "omp", displayName: "飞书", cwd: "D:\\project", dataDir: dir };
   const api: FeishuApi = {
+    dissolveSessionGroup: async () => {},
     createSessionGroup: async (name) => { created.push(name); return `oc_group_${created.length}`; },
     joinSessionGroup: async (chatId, openId) => { joined.push(`${chatId}:${openId}`); },
     sendCard: async (chatId, view) => { cards.push({ chatId, view }); return "om_card"; },
@@ -113,4 +114,120 @@ test("reset 先解除 TUI 绑定，再重置当前窗口 RPC 并保存", async (
   expect(reset).toBe(true);
   expect(state.collab.size).toBe(0);
   expect(await new ChatStore(storePath(f.dir)).get("oc_private")).toEqual({ cwd: "D:\\reset", sessionFile: "new.jsonl" });
+});
+
+test("关闭必须确认，可取消；确认后停止 RPC、解散群并保留本机历史索引", async () => {
+  const f = await fixture();
+  await f.bridge.onMessage(f.message("/new 网站"));
+  const events: string[] = [];
+  const state = f.bridge as unknown as { rpc: Map<string, unknown> };
+  state.rpc.set("oc_group_1", { liveGen: 0, session: { abort: () => { events.push("abort"); }, dispose: async () => { events.push("dispose"); } } });
+  await new ChatStore(storePath(f.dir)).set("oc_group_1", { cwd: "D:\\project", sessionFile: "history.jsonl" });
+  f.api.dissolveSessionGroup = async (id) => { events.push(`delete:${id}`); };
+  const msg = { ...f.message("/关闭"), chatId: "oc_group_1", chatType: "group" };
+  await f.bridge.onMessage(msg);
+  expect(events).toEqual([]);
+  const first = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  await f.bridge.onAction({ chatId: msg.chatId, openId: msg.openId, action: "close_cancel", payload: { token: first } });
+  expect(events).toEqual([]);
+  expect(f.texts.at(-1)).toContain("已取消");
+  await f.bridge.onMessage(msg);
+  const token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  const action = { chatId: msg.chatId, openId: msg.openId, action: "close_confirm", payload: { token } };
+  await Promise.all([f.bridge.onAction(action), f.bridge.onAction(action)]);
+  expect(events).toEqual(["abort", "dispose", "delete:oc_group_1"]);
+  expect(state.rpc.size).toBe(0);
+  const store = new GroupStore(join(f.dir, "groups.json"));
+  expect(await store.list()).toHaveLength(0);
+  expect((await store.get(msg.chatId))?.closedAt).toBeDefined();
+  expect((await new ChatStore(storePath(f.dir)).get(msg.chatId))?.sessionFile).toBe("history.jsonl");
+  const restarted = new Bridge(f.config, f.api);
+  const count = f.texts.length;
+  await restarted.onMessage({ ...msg, text: "迟到的普通文字" });
+  expect(f.texts).toHaveLength(count);
+  await restarted.onMessage(f.message("/new 网站"));
+  expect(f.created).toHaveLength(1);
+});
+
+test("列表关闭可从私聊操作；解散群失败保留列表并允许重新确认", async () => {
+  const f = await fixture();
+  await f.bridge.onMessage(f.message("/new 网站"));
+  await f.bridge.onMessage(f.message("/chats"));
+  const button = f.cards.at(-1)!.view.buttons.find(b => b.action === "close_group")!;
+  let attempts = 0;
+  f.api.dissolveSessionGroup = async () => { if (++attempts === 1) throw new Error("缺少 im:chat:delete"); };
+  const start = { chatId: "oc_private", openId: "ou_me", action: button.action, payload: button.payload! };
+  await f.bridge.onAction(start);
+  let token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  await f.bridge.onAction({ ...start, action: "close_confirm", payload: { token } });
+  expect((await new GroupStore(join(f.dir, "groups.json")).list()).length).toBe(1);
+  expect(f.texts.at(-1)).toContain("缺少 im:chat:delete");
+  await f.bridge.onAction(start);
+  token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  await f.bridge.onAction({ ...start, action: "close_confirm", payload: { token } });
+  expect(attempts).toBe(2);
+  expect(await new GroupStore(join(f.dir, "groups.json")).list()).toHaveLength(0);
+  expect(f.texts.at(-1)).toContain("群已解散");
+});
+
+test("普通群、私聊和非创建者不能解散群，确认令牌不能跨窗口使用", async () => {
+  const f = await fixture();
+  let deleted = 0;
+  f.api.dissolveSessionGroup = async () => { deleted++; };
+  await f.bridge.onMessage(f.message("/close"));
+  expect(f.texts.at(-1)).toContain("只能关闭自己");
+  await f.bridge.onMessage({ ...f.message("/close"), chatId: "oc_ordinary", chatType: "group" });
+  expect(f.texts.at(-1)).toContain("只能关闭自己");
+  await f.bridge.onMessage(f.message("/new 网站"));
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_other", action: "close_group", payload: { groupId: "oc_group_1" } });
+  expect(f.texts.at(-1)).toContain("只能关闭自己");
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_me", action: "close_group", payload: { groupId: "oc_group_1" } });
+  const token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  await f.bridge.onAction({ chatId: "oc_other", openId: "ou_me", action: "close_confirm", payload: { token } });
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_other", action: "close_confirm", payload: { token } });
+  expect(deleted).toBe(0);
+});
+
+test("过期和已取消的确认按钮不会关闭群", async () => {
+  const f = await fixture();
+  await f.bridge.onMessage(f.message("/new 网站"));
+  const start = { chatId: "oc_private", openId: "ou_me", action: "close_group", payload: { groupId: "oc_group_1" } };
+  let deleted = 0;
+  f.api.dissolveSessionGroup = async () => { deleted++; };
+  await f.bridge.onAction(start);
+  const token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  const internals = f.bridge as unknown as { closeRequests: Map<string, { expiresAt: number }> };
+  internals.closeRequests.get(token)!.expiresAt = Date.now() - 1;
+  await f.bridge.onAction({ ...start, action: "close_confirm", payload: { token } });
+  expect(deleted).toBe(0);
+  expect(f.texts.at(-1)).toContain("确认已失效");
+  await f.bridge.onAction(start);
+  const canceled = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  await f.bridge.onAction({ ...start, action: "close_cancel", payload: { token: canceled } });
+  await f.bridge.onAction({ ...start, action: "close_confirm", payload: { token: canceled } });
+  expect(deleted).toBe(0);
+});
+
+test("关闭时只断开 collab，不终止共享 TUI；等待正在启动的 RPC", async () => {
+  const f = await fixture();
+  await f.bridge.onMessage(f.message("/new 网站"));
+  const events: string[] = [];
+  const internals = f.bridge as unknown as {
+    collab: Map<string, unknown>; rpc: Map<string, unknown>; startingRpc: Map<string, Promise<unknown>>;
+  };
+  internals.collab.set("oc_group_1", { guest: { close: () => { events.push("leave"); } } });
+  const ready = Promise.withResolvers<unknown>();
+  internals.startingRpc.set("oc_group_1", ready.promise);
+  f.api.dissolveSessionGroup = async () => { events.push("delete"); };
+  const start = { chatId: "oc_private", openId: "ou_me", action: "close_group", payload: { groupId: "oc_group_1" } };
+  await f.bridge.onAction(start);
+  const token = f.cards.at(-1)!.view.buttons[0]!.payload!.token!;
+  const completion = f.bridge.onAction({ ...start, action: "close_confirm", payload: { token } });
+  // 下一次事件循环后关闭应阻塞在 RPC 启动上，不能提前解散群。
+  await Bun.sleep(5);
+  expect(events).toEqual([]);
+  internals.rpc.set("oc_group_1", { session: { dispose: async () => { events.push("dispose"); } } });
+  ready.resolve({});
+  await completion;
+  expect(events).toEqual(["leave", "dispose", "delete"]);
 });

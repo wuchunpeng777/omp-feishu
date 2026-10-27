@@ -10,6 +10,7 @@ export type SessionGroup = {
   ownerOpenId: string;
   createdAt: string;
   requestId: string;
+  closedAt?: string;
 };
 
 export class GroupStore {
@@ -32,12 +33,23 @@ export class GroupStore {
   async list(ownerOpenId?: string): Promise<SessionGroup[]> {
     await this.chain;
     const groups = await this.read();
-    return groups.filter(g => !ownerOpenId || g.ownerOpenId === ownerOpenId)
+    return groups.filter(g => !g.closedAt && (!ownerOpenId || g.ownerOpenId === ownerOpenId))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async get(chatId: string): Promise<SessionGroup | undefined> {
-    return (await this.list()).find(g => g.chatId === chatId);
+    await this.chain;
+    return (await this.read()).find(g => g.chatId === chatId);
+  }
+
+  async findRequest(ownerOpenId: string, requestId: string): Promise<SessionGroup | undefined> {
+    await this.chain;
+    return (await this.read()).find(g => g.ownerOpenId === ownerOpenId && g.requestId === requestId);
+  }
+
+  async close(chatId: string): Promise<void> {
+    const group = await this.get(chatId);
+    if (group) await this.put({ ...group, closedAt: new Date().toISOString() });
   }
 
   async put(group: SessionGroup): Promise<void> {
@@ -69,12 +81,13 @@ export function groupListCard(groups: SessionGroup[], page: number, domain: Feis
     title: `我的 omp 会话 · ${groups.length} 个 · ${current}/${pages}`,
     template: "blue",
     markdown: selected.length
-      ? selected.map((g, i) => `${(current - 1) * 5 + i + 1}. ${g.name.replace(/[\n\r*_\[\]<>`]/g, " ")}`).join("\n") + "\n\n点击打开对应群；退群后可点重新加入。"
+      ? selected.map((g, i) => `${(current - 1) * 5 + i + 1}. ${g.name.replace(/[\n\r*_\[\]<>`]/g, " ")}`).join("\n") + "\n\n点击打开对应群；退群后可点重新加入，关闭需二次确认。"
       : "还没有会话群。发送 /new 名称 创建，首次发消息时启动独立 omp 会话。",
     buttons: [
       ...selected.flatMap((g, i) => [
         { text: `打开 ${(current - 1) * 5 + i + 1}`, action: "open_group", url: groupUrl(g.chatId, domain) },
         { text: `重新加入 ${(current - 1) * 5 + i + 1}`, action: "join_group", payload: { groupId: g.chatId } },
+        { text: `关闭 ${(current - 1) * 5 + i + 1}`, action: "close_group", type: "danger" as const, payload: { groupId: g.chatId } },
       ]),
       ...(current > 1 ? [{ text: "上一页", action: "groups", payload: { page: String(current - 1) } }] : []),
       ...(current < pages ? [{ text: "下一页", action: "groups", payload: { page: String(current + 1) } }] : []),
