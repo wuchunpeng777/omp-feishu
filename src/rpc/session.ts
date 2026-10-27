@@ -595,7 +595,7 @@ function asRpcModel(value: unknown): RpcModel | undefined {
 
 function asAgentMessage(value: unknown): AgentMessage | undefined {
   if (!value || typeof value !== "object") return undefined;
-  return value;
+  return value as AgentMessage;
 }
 
 function textDelta(value: unknown): string | undefined {

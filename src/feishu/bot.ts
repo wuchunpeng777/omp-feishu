@@ -75,6 +75,8 @@ export type MessageHandler = (msg: IncomingMessage) => Promise<void> | void;
 export type ActionHandler = (action: CardAction) => Promise<void> | void;
 
 export type FeishuApi = {
+  createSessionGroup: (name: string, openId: string, uuid: string) => Promise<string>;
+  joinSessionGroup: (chatId: string, openId: string) => Promise<void>;
   sendCard: (chatId: string, view: CardView) => Promise<string | undefined>;
   replyCard: (messageId: string, view: CardView) => Promise<string | undefined>;
   patchCard: (messageId: string, view: CardView) => Promise<boolean>;
@@ -181,6 +183,35 @@ export function createFeishu(config: AppConfig): FeishuApi {
     loggerLevel: Lark.LoggerLevel.info,
   };
   let kitDisabled = false;
+
+  async function createSessionGroup(name: string, openId: string, uuid: string): Promise<string> {
+    const res = await client.im.v1.chat.create({
+      params: { user_id_type: "open_id", uuid },
+      data: {
+        name, chat_mode: "group", chat_type: "private",
+        group_message_type: "chat", user_id_list: [openId],
+        description: "独立 omp 会话；发送 /help 查看命令。",
+      },
+    });
+    if (res.code !== 0 || !res.data?.chat_id) {
+      throw new Error(`创建会话群失败：${res.code} ${res.msg}；请检查 im:chat:create 权限和应用可用范围。`);
+    }
+    return res.data.chat_id;
+  }
+
+  async function joinSessionGroup(chatId: string, openId: string): Promise<void> {
+    const res = await client.im.v1.chatMembers.create({
+      path: { chat_id: chatId }, params: { member_id_type: "open_id" },
+      data: { id_list: [openId] },
+    });
+    const rejected = [
+      ...(res.data?.invalid_id_list ?? []), ...(res.data?.not_existed_id_list ?? []),
+      ...(res.data?.pending_approval_id_list ?? []),
+    ];
+    if (res.code !== 0 || rejected.includes(openId)) {
+      throw new Error(`加入群失败：${res.code} ${res.msg}；请检查 im:chat.members:write_only 权限、群是否仍存在和成员审批。`);
+    }
+  }
 
   async function sendCard(chatId: string, view: CardView): Promise<string | undefined> {
     const res = await client.im.v1.message.create({
@@ -556,7 +587,7 @@ export function createFeishu(config: AppConfig): FeishuApi {
           console.error("处理消息失败", err);
         }
       },
-      "card.action.trigger": async (data) => {
+      "card.action.trigger": async (data: unknown) => {
         try {
           const rec = data as {
             operator?: { open_id?: string };
@@ -607,5 +638,5 @@ export function createFeishu(config: AppConfig): FeishuApi {
     }
   }
 
-  return { sendCard, replyCard, patchCard, pushLiveCard, sendText, notifyDone, start };
+  return { createSessionGroup, joinSessionGroup, sendCard, replyCard, patchCard, pushLiveCard, sendText, notifyDone, start };
 }

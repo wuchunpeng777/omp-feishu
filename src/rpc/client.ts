@@ -131,7 +131,9 @@ export class RpcClient {
   }
 
   private async readLoop(): Promise<void> {
-    const reader = this.proc.stdout.getReader();
+    const stdout = this.proc.stdout;
+    if (!stdout || typeof stdout === "number") return;
+    const reader = stdout.getReader();
     const decoder = new TextDecoder();
     let buf = "";
     try {
@@ -210,7 +212,9 @@ export class RpcClient {
   }
 
   private async drainStderr(): Promise<void> {
-    const reader = this.proc.stderr.getReader();
+    const stderr = this.proc.stderr;
+    if (!stderr || typeof stderr === "number") return;
+    const reader = stderr.getReader();
     const decoder = new TextDecoder();
     let buf = "";
     while (true) {

@@ -11,18 +11,24 @@ export type ChatPersist = {
 export class ChatStore {
   private records: Record<string, ChatPersist> = {};
   private loaded = false;
+  private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly file: string) {}
 
   async get(chatId: string): Promise<ChatPersist | undefined> {
+    await this.chain;
     await this.ensure();
     return this.records[chatId];
   }
 
   async set(chatId: string, rec: ChatPersist): Promise<void> {
-    await this.ensure();
-    this.records[chatId] = rec;
-    await this.flush();
+    const operation = this.chain.then(async () => {
+      await this.ensure();
+      this.records[chatId] = rec;
+      await this.flush();
+    });
+    this.chain = operation.catch(() => {});
+    await operation;
   }
 
   private async ensure(): Promise<void> {

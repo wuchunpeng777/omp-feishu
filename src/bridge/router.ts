@@ -1,6 +1,8 @@
 /** 飞书对话：默认 RPC 会话（A），/attach 挂本机 collab（B）。 */
 
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { GroupStore, groupListCard, groupUrl } from "../rpc/groups.ts";
 import {
   ensureCollabHost,
   fetchCollabLink,
@@ -54,16 +56,21 @@ type RpcBinding = CardPump & {
 export class Bridge {
   private readonly collab = new Map<string, CollabBinding>();
   private readonly rpc = new Map<string, RpcBinding>();
+  private readonly startingRpc = new Map<string, Promise<RpcBinding>>();
   private readonly store: ChatStore;
+  private readonly groups: GroupStore;
+  private readonly creating = new Map<string, Promise<void>>();
 
   constructor(
     private readonly config: AppConfig,
     private readonly feishu: FeishuApi,
   ) {
     this.store = new ChatStore(storePath(config.dataDir));
+    this.groups = new GroupStore(join(config.dataDir, "groups.json"));
   }
 
   allowed(openId: string): boolean {
+    if (!openId) return false;
     if (this.config.allowOpenIds.size === 0) return true;
     return this.config.allowOpenIds.has(openId);
   }
@@ -90,7 +97,12 @@ export class Bridge {
     const group = msg.chatType !== "p2p";
     const text = msg.text.trim();
     if (!text) return;
-    if (group && !msg.mentioned && !text.startsWith("/")) return;
+    const managed = group ? await this.groups.get(msg.chatId) : undefined;
+    if (managed && managed.ownerOpenId !== msg.openId) {
+      await this.feishu.sendText(msg.chatId, "这个会话群只接受创建者的指令。");
+      return;
+    }
+    if (group && !managed && !msg.mentioned && !text.startsWith("/")) return;
 
     const command = parseCommand(text);
     if (command) {
@@ -151,6 +163,8 @@ export class Bridge {
       await this.handleAction(action);
     } catch (err) {
       console.error("onAction", err);
+      await this.feishu.sendText(action.chatId,
+        `操作失败：${err instanceof Error ? err.message : String(err)}`).catch(() => {});
     }
   }
 
@@ -164,7 +178,15 @@ export class Bridge {
       text: "",
       mentioned: true,
     };
+    const managed = await this.groups.get(action.chatId);
+    if (managed && managed.ownerOpenId !== action.openId) return;
     switch (action.action) {
+      case "groups":
+        await this.sendGroups(fake, action.payload.page ?? "1");
+        break;
+      case "join_group":
+        await this.joinGroup(fake, action.payload.groupId ?? "");
+        break;
       case "attach":
         await this.dispatch(
           fake,
@@ -242,6 +264,12 @@ export class Bridge {
         await this.leaveCollab(msg.chatId, true);
         break;
       case "new":
+        await this.createGroup(msg, arg);
+        break;
+      case "chats":
+        await this.sendGroups(msg, arg);
+        break;
+      case "reset":
         await this.newRpc(msg.chatId);
         break;
       case "cwd":
@@ -373,7 +401,58 @@ export class Bridge {
     if (notify) await this.feishu.sendText(chatId, "已离开 collab，回到飞书 omp。");
   }
 
+  private async sendGroups(msg: IncomingMessage, arg: string): Promise<void> {
+    const page = arg ? Number(arg) : 1;
+    if (!Number.isSafeInteger(page) || page < 1) throw new Error("页码必须是正整数，例如 /chats 2");
+    const groups = await this.groups.list(msg.openId);
+    await this.feishu.sendCard(msg.chatId, groupListCard(groups, page, this.config.domain));
+  }
+
+  private async joinGroup(msg: IncomingMessage, groupId: string): Promise<void> {
+    const group = await this.groups.get(groupId);
+    if (!group || group.ownerOpenId !== msg.openId) throw new Error("找不到你创建的会话群。");
+    await this.feishu.joinSessionGroup(group.chatId, msg.openId);
+    await this.feishu.sendCard(msg.chatId, {
+      title: "已加入会话群", template: "green", markdown: "点击下方按钮打开会话。",
+      buttons: [{ text: "打开会话群", action: "open_group", url: groupUrl(group.chatId, this.config.domain) }],
+    });
+  }
+
+  private async createGroup(msg: IncomingMessage, arg: string): Promise<void> {
+    if (!msg.openId) throw new Error("缺少用户 open_id，无法创建会话群。");
+    const requestId = createHash("sha256").update(`${msg.openId}:${msg.messageId || randomUUID()}`).digest("hex").slice(0, 32);
+    const active = this.creating.get(requestId);
+    if (active) return active;
+    const operation = this.doCreateGroup(msg, arg, requestId);
+    this.creating.set(requestId, operation);
+    try { await operation; } finally { this.creating.delete(requestId); }
+  }
+
+  private async doCreateGroup(msg: IncomingMessage, arg: string, requestId: string): Promise<void> {
+    let record = (await this.groups.list(msg.openId)).find(g => g.requestId === requestId);
+    if (!record) {
+      const title = arg.trim() || "新会话";
+      if (title.length > 60 || /[\r\n]/.test(title)) throw new Error("会话名称请使用不超过 60 字的单行文字。");
+      const name = `omp · ${title}`;
+      const chatId = await this.feishu.createSessionGroup(name, msg.openId, requestId);
+      record = { chatId, name, ownerOpenId: msg.openId, requestId, createdAt: new Date().toISOString() };
+      // 先记录群，后续配置失败也能通过 /chats 找回，重试不会另建一个群。
+      await this.groups.put(record);
+    }
+    if (!(await this.store.get(record.chatId))) {
+      const source = await this.store.get(msg.chatId);
+      await this.store.set(record.chatId, { cwd: source?.cwd ?? this.config.cwd });
+    }
+    await this.feishu.sendText(record.chatId,
+      "这是独立的 omp 会话群。直接发送文字即可开始；/cwd 目录 设置 Windows 工作目录，/reset 重置当前上下文，/chats 查看我的所有会话。首次发送文字时启动 omp，重启机器人后可恢复历史。未配置群普通消息权限时请 @机器人。");
+    await this.feishu.sendCard(msg.chatId, {
+      title: "会话群已创建", template: "green", markdown: "新会话已准备好，点击进入群聊。",
+      buttons: [{ text: "进入新会话群", action: "open_group", url: groupUrl(record.chatId, this.config.domain) }],
+    });
+  }
+
   private async newRpc(chatId: string): Promise<void> {
+    await this.leaveCollab(chatId, false);
     const rpc = await this.ensureRpc(chatId);
     this.recycleLiveCard(rpc);
     await rpc.session.newSession();
@@ -554,6 +633,14 @@ export class Bridge {
   }
 
   private async ensureRpc(chatId: string): Promise<RpcBinding> {
+    const pending = this.startingRpc.get(chatId);
+    if (pending) return pending;
+    const operation = this.startRpc(chatId);
+    this.startingRpc.set(chatId, operation);
+    try { return await operation; } finally { this.startingRpc.delete(chatId); }
+  }
+
+  private async startRpc(chatId: string): Promise<RpcBinding> {
     const existing = this.rpc.get(chatId);
     if (existing && existing.session.snapshot().status !== "ended") {
       return existing;
@@ -712,8 +799,10 @@ function parseCommand(
     help: "help",
     帮助: "help",
     list: "list",
-    sessions: "list",
-    会话: "list",
+    sessions: "chats",
+    chats: "chats",
+    会话: "chats",
+    对话: "chats",
     attach: "attach",
     接入: "attach",
     view: "view",
@@ -726,6 +815,9 @@ function parseCommand(
     状态: "status",
     new: "new",
     新开: "new",
+    新建: "new",
+    reset: "reset",
+    重置: "reset",
     cwd: "cwd",
     model: "model",
     模型: "model",

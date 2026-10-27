@@ -11,12 +11,17 @@
     "running": "bun src/index.ts running",
     "dev": "bun --watch src/index.ts",
     "list": "bun src/index.ts list",
-    "test": "bun test"
+    "test": "bun test",
+    "check": "tsc --noEmit"
   },
   "engines": {
     "bun": ">=1.1.0"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.55.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^5.9.3"
   }
 }

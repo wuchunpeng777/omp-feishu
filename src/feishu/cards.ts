@@ -55,7 +55,10 @@ export function buildCard(view: CardView): Record<string, unknown> {
     });
   }
   if (actions.length > 0) {
-    elements.push({ tag: "action", actions });
+    // JSON 1.0 每个 action 容器最多放 5 个按钮。
+    for (let i = 0; i < actions.length; i += 5) {
+      elements.push({ tag: "action", actions: actions.slice(i, i + 5) });
+    }
   }
   return {
     config: { wide_screen_mode: true, update_multi: true },
@@ -138,7 +141,7 @@ function buttonElementV1(button: CardButton): Record<string, unknown> {
     tag: "button",
     text: { tag: "plain_text", content: text },
     type: button.type ?? "default",
-    value: buttonValue(button),
+    ...(button.url ? { url: button.url } : { value: buttonValue(button) }),
   };
 }
 
@@ -152,7 +155,9 @@ function buttonElementV2(
     element_id: `btn_${index}`,
     text: { tag: "plain_text", content: button.text },
     type: button.type ?? "default",
-    behaviors: [{ type: "callback", value }],
+    behaviors: button.url
+      ? [{ type: "open_url", default_url: button.url }]
+      : [{ type: "callback", value }],
   };
   if (button.width === "fill") el.width = "fill";
   if (button.hoverTips) {
