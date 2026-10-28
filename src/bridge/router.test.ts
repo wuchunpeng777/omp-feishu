@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bridge } from "./router.ts";
@@ -230,4 +230,66 @@ test("关闭时只断开 collab，不终止共享 TUI；等待正在启动的 RP
   ready.resolve({});
   await completion;
   expect(events).toEqual(["leave", "dispose", "delete"]);
+});
+
+test("目录点选只重建当前会话，移除旧上下文并持久保存目录", async () => {
+  const f = await fixture();
+  const target = join(f.dir, "project with spaces");
+  await mkdir(target);
+  await writeFile(join(f.dir, "cwd-presets.json"), JSON.stringify([{ name: "项目", path: target }]));
+  const store = new ChatStore(storePath(f.dir));
+  await store.set("oc_private", { cwd: f.dir, sessionFile: "old.jsonl" });
+  await store.set("oc_other", { cwd: f.dir, sessionFile: "other.jsonl" });
+  let disposed = false;
+  const state = f.bridge as unknown as {
+    ensureRpc: (chatId: string) => Promise<unknown>; rpc: Map<string, unknown>;
+  };
+  state.rpc.set("oc_private", { session: { dispose: async () => { disposed = true; } } });
+  state.ensureRpc = async () => ({});
+  await f.bridge.onMessage(f.message("/cwd"));
+  const button = f.cards.at(-1)!.view.buttons[0]!;
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_me", action: button.action, payload: button.payload! });
+  const restarted = new ChatStore(storePath(f.dir));
+  expect(disposed).toBe(true);
+  expect(await restarted.get("oc_private")).toEqual({ cwd: target });
+  expect(await restarted.get("oc_other")).toEqual({ cwd: f.dir, sessionFile: "other.jsonl" });
+});
+
+test("过期目录按钮不能切到新条目，不存在的目录不停止原会话", async () => {
+  const f = await fixture();
+  const file = join(f.dir, "cwd-presets.json");
+  await writeFile(file, JSON.stringify([{ name: "项目", path: f.dir }]));
+  await new ChatStore(storePath(f.dir)).set("oc_private", { cwd: f.dir, sessionFile: "keep.jsonl" });
+  const state = f.bridge as unknown as { rpc: Map<string, unknown> };
+  let disposed = false;
+  state.rpc.set("oc_private", { session: { dispose: async () => { disposed = true; } } });
+  await f.bridge.onMessage(f.message("/cwd"));
+  const button = f.cards.at(-1)!.view.buttons[0]!;
+  await writeFile(file, JSON.stringify([{ name: "新项目", path: join(f.dir, "missing") }]));
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_me", action: button.action, payload: button.payload! });
+  expect(f.texts.at(-1)).toContain("常用目录已变更");
+  await f.bridge.onMessage(f.message("/cwd"));
+  const missing = f.cards.at(-1)!.view.buttons[0]!;
+  await f.bridge.onAction({ chatId: "oc_private", openId: "ou_me", action: missing.action, payload: missing.payload! });
+  expect(disposed).toBe(false);
+  expect(await new ChatStore(storePath(f.dir)).get("oc_private")).toEqual({ cwd: f.dir, sessionFile: "keep.jsonl" });
+  await writeFile(file, "{bad json");
+  await f.bridge.onMessage(f.message("/cwd"));
+  expect(disposed).toBe(false);
+  expect(await new ChatStore(storePath(f.dir)).get("oc_private")).toEqual({ cwd: f.dir, sessionFile: "keep.jsonl" });
+});
+
+test("目录点选遵循群创建者权限且不能改变接入中的电脑TUI", async () => {
+  const f = await fixture();
+  await f.bridge.onMessage(f.message("/new 项目"));
+  await writeFile(join(f.dir, "cwd-presets.json"), JSON.stringify([{ name: "项目", path: f.dir }]));
+  await f.bridge.onMessage({ ...f.message("/cwd"), chatId: "oc_group_1", chatType: "group" });
+  const button = f.cards.at(-1)!.view.buttons[0]!;
+  await f.bridge.onAction({ chatId: "oc_group_1", openId: "ou_other", action: button.action, payload: button.payload! });
+  expect(await new ChatStore(storePath(f.dir)).get("oc_group_1")).toEqual({ cwd: f.config.cwd });
+  const state = f.bridge as unknown as { collab: Map<string, unknown> };
+  state.collab.set("oc_group_1", {});
+  await f.bridge.onAction({ chatId: "oc_group_1", openId: "ou_me", action: button.action, payload: button.payload! });
+  expect(f.texts.at(-1)).toContain("/leave");
+  expect(await new ChatStore(storePath(f.dir)).get("oc_group_1")).toEqual({ cwd: f.config.cwd });
 });

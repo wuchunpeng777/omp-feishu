@@ -1,6 +1,7 @@
 /** 飞书对话：默认 RPC 会话（A），/attach 挂本机 collab（B）。 */
 
-import { resolve, join } from "node:path";
+import { resolve, join, isAbsolute } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { GroupStore, groupListCard, groupUrl } from "../rpc/groups.ts";
 import {
@@ -203,6 +204,13 @@ export class Bridge {
       case "join_group":
         await this.joinGroup(fake, action.payload.groupId ?? "");
         break;
+      case "set_cwd": {
+        const presets = await this.cwdPresets();
+        const preset = presets.find((item) => item.id === action.payload.presetId);
+        if (!preset) throw new Error("常用目录已变更，请重新发送 /cwd 选择。");
+        await this.setCwd(fake, preset.path);
+        break;
+      }
       case "attach":
         await this.dispatch(
           fake,
@@ -540,16 +548,57 @@ export class Bridge {
     await this.feishu.sendText(chatId, "已开新的 omp 会话。");
   }
 
+  private async cwdPresets(): Promise<Array<{ name: string; path: string; id: string }>> {
+    const file = join(this.config.dataDir, "cwd-presets.json");
+    let raw: string;
+    try {
+      raw = await readFile(file, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw err;
+    }
+    const entries: unknown = JSON.parse(raw);
+    if (!Array.isArray(entries)) throw new Error("cwd-presets.json 必须是目录数组。");
+    return entries.map((entry: unknown) => {
+      if (!entry || typeof entry !== "object" || !("name" in entry) || !("path" in entry) ||
+          typeof entry.name !== "string" || !entry.name.trim() ||
+          typeof entry.path !== "string" || !isAbsolute(entry.path)) {
+        throw new Error("cwd-presets.json 每项需要 name 和绝对路径 path。");
+      }
+      const path = resolve(entry.path);
+      return { name: entry.name.trim(), path, id: createHash("sha256").update(path).digest("hex") };
+    });
+  }
+
   private async setCwd(msg: IncomingMessage, arg: string): Promise<void> {
+    if (this.collab.has(msg.chatId)) {
+      await this.feishu.sendText(msg.chatId, "当前接入电脑 TUI，请先 /leave，再选择飞书会话的工作目录。");
+      return;
+    }
     if (!arg) {
       const rec = await this.store.get(msg.chatId);
-      await this.feishu.sendText(
-        msg.chatId,
-        `当前目录：${rec?.cwd ?? this.config.cwd}`,
-      );
+      const current = rec?.cwd ?? this.config.cwd;
+      const presets = await this.cwdPresets();
+      await this.feishu.sendCard(msg.chatId, {
+        title: "选择工作目录", template: "indigo",
+        markdown: [
+          `当前目录：\`${current}\``,
+          ...presets.map((item) => `**${item.name}**：\`${item.path}\``),
+          "",
+          presets.length ? "点击按钮切换当前会话，也可发送 `/cwd 绝对路径`。" : "尚未预置常用目录，可发送 `/cwd 绝对路径`。",
+          "切换会停止当前会话进程并开启新上下文；其他会话不受影响。",
+        ].join("\n"),
+        buttons: presets.map((item) => ({
+          text: item.name, action: "set_cwd", width: "fill",
+          type: item.path === current ? "primary" : "default",
+          payload: { presetId: item.id },
+        })),
+      });
       return;
     }
     const cwd = resolve(arg);
+    if (!(await stat(cwd)).isDirectory()) throw new Error(`不是文件夹：${cwd}`);
+    await this.startingRpc.get(msg.chatId);
     const old = this.rpc.get(msg.chatId);
     if (old) {
       this.rpc.delete(msg.chatId);
