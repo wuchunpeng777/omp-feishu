@@ -61,7 +61,7 @@ export function buildCard(view: CardView): Record<string, unknown> {
     }
   }
   return {
-    config: { wide_screen_mode: true, update_multi: true },
+    config: { width_mode: "fill", update_multi: true },
     header: {
       title: { tag: "plain_text", content: view.title },
       template: view.template,
@@ -112,6 +112,7 @@ export function buildCardV2(view: CardView): Record<string, unknown> {
   return {
     schema: "2.0",
     config: {
+      width_mode: "fill",
       update_multi: true,
       streaming_mode: streaming,
       summary: { content: view.title },
