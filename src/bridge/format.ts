@@ -438,7 +438,7 @@ export function formatHostList(
   return {
     title: `本机 TUI ${hosts.length}`,
     template: "indigo",
-    markdown: `${lines.join("\n\n")}\n\n未分享的会话会先向该 TUI 发送 \`/collab\`，成功后再接入。`,
+    markdown: `${lines.join("\n\n")}\n\n点击接入独立会话群，原窗口返回进入按钮；已有专用群内直接接入当前群。未分享的会先开启 \`/collab\`。`,
     buttons: hosts.slice(0, 6).map((host, i) => {
       const selector = host.instanceId || (host.pid != null ? String(host.pid) : "");
       const sharing = host.sharing !== false;
@@ -523,8 +523,8 @@ export const HELP_TEXT = `飞书里直接用 omp（A），也可以挂本机 TUI
 
 **B · 挂已有 TUI**
 - \`/list\` 列出本机正在跑的 TUI（含未开 collab 的）
-- \`/attach [序号|pid|id]\` 接入；未分享的会先开启 collab
-- \`/view [序号]\` 只读
+- \`/attach [序号|pid|id]\` 接入独立会话群；未分享的先开启 collab；已有专用群内接入当前群
+- \`/view [序号]\` 同上，只读接入
 - \`/leave\` 离开 collab，回到 A
 
 \`/status\` 当前绑定。群里要 @机器人 或打 \`/\`。`;

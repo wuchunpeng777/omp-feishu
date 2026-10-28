@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,9 @@ import type { FeishuApi, IncomingMessage } from "../feishu/bot.ts";
 import type { CardView } from "./format.ts";
 import { GroupStore } from "../rpc/groups.ts";
 import { ChatStore, storePath } from "../rpc/store.ts";
+import * as hosts from "../collab/hosts.ts";
+import { CollabGuest } from "../collab/guest.ts";
+import { encodeBase64Url } from "../collab/crypto.ts";
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "omp-router-"));
@@ -292,4 +295,122 @@ test("目录点选遵循群创建者权限且不能改变接入中的电脑TUI",
   await f.bridge.onAction({ chatId: "oc_group_1", openId: "ou_me", action: button.action, payload: button.payload! });
   expect(f.texts.at(-1)).toContain("/leave");
   expect(await new ChatStore(storePath(f.dir)).get("oc_group_1")).toEqual({ cwd: f.config.cwd });
+});
+
+async function collabFixture() {
+  const f = await fixture();
+  const host = { instanceId: "tui_fixture_1234", sessionName: "电脑项目", cwd: f.dir, sharing: true };
+  const list = spyOn(hosts, "listLiveConversations").mockResolvedValue([host]);
+  const ensure = spyOn(hosts, "ensureCollabHost").mockResolvedValue(host);
+  const secret = encodeBase64Url(new Uint8Array(48).fill(1));
+  const link = spyOn(hosts, "fetchCollabLink").mockResolvedValue({
+    instanceId: host.instanceId, access: "control", url: `ws://127.0.0.1:1/r/tui_fixture_1234.${secret}`,
+  });
+  const connect = spyOn(CollabGuest.prototype, "connect").mockImplementation(function(this: CollabGuest) {
+    // 仅替换网络握手；状态归约和后续消息路由仍使用真实 CollabGuest。
+    const guest = this as unknown as { apply(frame: unknown): void };
+    guest.apply({
+      t: "welcome", entryCount: 0, state: { isStreaming: false }, agents: [], readOnly: false,
+    });
+  });
+  const bridges = [f.bridge];
+  const state = (bridge: Bridge) => bridge as unknown as {
+    collab: Map<string, { guest: CollabGuest }>;
+    leaveCollab(chatId: string, notify: boolean, forget: boolean): Promise<void>;
+  };
+  const restart = async () => {
+    const previous = bridges.at(-1)!;
+    for (const id of state(previous).collab.keys()) await state(previous).leaveCollab(id, false, false);
+    const next = new Bridge(f.config, f.api);
+    bridges.push(next);
+    return next;
+  };
+  const dispose = async () => {
+    for (const bridge of bridges) {
+      for (const id of state(bridge).collab.keys()) await state(bridge).leaveCollab(id, false, false);
+    }
+    connect.mockRestore(); link.mockRestore(); ensure.mockRestore(); list.mockRestore();
+  };
+  return { ...f, host, list, state, restart, dispose };
+}
+
+test("公共窗口接入创建独立群，并发点击复用；消息、输出与所有者隔离", async () => {
+  const f = await collabFixture();
+  try {
+    const action = { chatId: "oc_private", openId: "ou_me", action: "attach", payload: { selector: f.host.instanceId } };
+    await Promise.all([f.bridge.onAction(action), f.bridge.onAction(action)]);
+    expect(f.created).toEqual(["omp · 电脑项目"]);
+    expect([...f.state(f.bridge).collab.keys()]).toEqual(["oc_group_1"]);
+    expect(f.cards.at(-1)?.view.buttons[0]?.url).toContain("oc_group_1");
+    const message = { ...f.message("独立窗口的指令"), chatType: "group", chatId: "oc_group_1" };
+    await f.bridge.onMessage({ ...message, openId: "ou_other" });
+    const guest = f.state(f.bridge).collab.get("oc_group_1")!.guest;
+    expect(guest.snapshot().entries).toEqual([]);
+    await f.bridge.onMessage(message);
+    expect(guest.snapshot().entries).toEqual([
+      { type: "message", message: { role: "user", content: [{ type: "text", text: message.text }] } },
+    ]);
+    const streamed: string[] = [];
+    const flushed = Promise.withResolvers<void>();
+    f.api.pushLiveCard = async (chatId) => {
+      streamed.push(chatId); flushed.resolve();
+      return { sequence: 0, streaming: false, markdown: "", structure: "" };
+    };
+    await flushed.promise;
+    expect(streamed).toEqual(["oc_group_1"]);
+    await f.bridge.onMessage({ ...f.message("/attach 1"), openId: "ou_other" });
+    expect(f.created).toHaveLength(2);
+    expect((await new GroupStore(join(f.dir, "groups.json")).list("ou_other"))[0]?.chatId).toBe("oc_group_2");
+  } finally { await f.dispose(); }
+});
+
+test("接入群重启后复用并恢复 TUI；离开清除绑定；专用群内接入不另建群", async () => {
+  const f = await collabFixture();
+  try {
+    await f.bridge.onMessage(f.message("/view 1"));
+    let restarted = await f.restart();
+    await restarted.onMessage(f.message("/view 1"));
+    expect(f.created).toHaveLength(1);
+    expect(f.joined).toEqual(["oc_group_1:ou_me"]);
+    restarted = await f.restart();
+    const message = { ...f.message("只读不能写入"), chatType: "group", chatId: "oc_group_1" };
+    await restarted.onMessage(message);
+    expect(f.state(restarted).collab.get(message.chatId)?.guest.snapshot().entries).toEqual([]);
+    expect(f.texts.at(-1)).toContain("只读接入");
+    await restarted.onMessage({ ...message, text: "/attach 1" });
+    expect(f.created).toHaveLength(1);
+    await restarted.onMessage({ ...message, text: "切成控制后写入" });
+    expect(f.state(restarted).collab.get(message.chatId)?.guest.snapshot().entries[0]?.message?.content)
+      .toEqual([{ type: "text", text: "切成控制后写入" }]);
+    await restarted.onMessage({ ...message, text: "/leave" });
+    expect((await new GroupStore(join(f.dir, "groups.json")).get(message.chatId))?.collab).toBeUndefined();
+    expect(f.state(restarted).collab.size).toBe(0);
+  } finally { await f.dispose(); }
+});
+
+test("接入建群权限失败不回退公共窗口；重启后主机离线不启动 RPC", async () => {
+  const f = await collabFixture();
+  try {
+    const create = f.api.createSessionGroup;
+    f.api.createSessionGroup = async () => { throw new Error("缺少建群权限"); };
+    await f.bridge.onMessage(f.message("/attach 1"));
+    expect(f.texts.at(-1)).toContain("缺少建群权限");
+    expect(f.state(f.bridge).collab.size).toBe(0);
+    expect(await new GroupStore(join(f.dir, "groups.json")).list()).toEqual([]);
+    f.api.createSessionGroup = create;
+    await f.bridge.onMessage(f.message("/attach 1"));
+    const restarted = await f.restart();
+    f.list.mockResolvedValue([]);
+    let rpcStarted = false;
+    // 测试边界：观察离线恢复是否错误进入 RPC 分支。
+    const internals = restarted as unknown as { ensureRpc(): Promise<unknown> };
+    internals.ensureRpc = async () => {
+      rpcStarted = true; throw new Error("不能启动");
+    };
+    await restarted.onMessage({ ...f.message("发给电脑"), chatType: "group", chatId: "oc_group_1" });
+    expect(rpcStarted).toBe(false);
+    expect(f.state(restarted).collab.size).toBe(0);
+    expect((await new GroupStore(join(f.dir, "groups.json")).get("oc_group_1"))?.collab?.instanceId)
+      .toBe(f.host.instanceId);
+  } finally { await f.dispose(); }
 });

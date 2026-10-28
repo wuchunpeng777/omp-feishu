@@ -11,6 +11,7 @@ export type SessionGroup = {
   createdAt: string;
   requestId: string;
   closedAt?: string;
+  collab?: { instanceId: string; access: "view" | "control" };
 };
 
 export class GroupStore {

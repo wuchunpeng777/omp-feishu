@@ -66,6 +66,7 @@ export class Bridge {
     sourceChatId: string; groupId: string; ownerOpenId: string; expiresAt: number;
   }>();
   private readonly creating = new Map<string, Promise<void>>();
+  private readonly attachingGroups = new Map<string, Promise<string>>();
 
   constructor(
     private readonly config: AppConfig,
@@ -117,6 +118,11 @@ export class Bridge {
       return;
     }
 
+    if (managed?.collab && !this.collab.has(msg.chatId)) {
+      await this.attach(msg, managed.collab.instanceId, managed.collab.access);
+      // 恢复失败时不能把发给共享 TUI 的文字误发到新的 RPC 上下文。
+      if (!this.collab.has(msg.chatId)) return;
+    }
     const collab = this.collab.get(msg.chatId);
     if (collab) {
       collab.lastOpenId = msg.openId;
@@ -361,7 +367,7 @@ export class Bridge {
       if (conversations.length === 0) {
         await this.feishu.sendText(
           msg.chatId,
-          "本机没有正在跑的 omp TUI。打开 omp 后再 /list。不挂的话直接发文字走飞书自己的 omp。",
+          "本机没有正在跑的 omp TUI。打开 omp 后再 /list。",
         );
         return;
       }
@@ -382,33 +388,28 @@ export class Bridge {
       }
       const host = await ensureCollabHost(conversation, this.config.ompBin);
       if (access === "control" && host.access === "view") access = "view";
-      const link = await fetchCollabLink(
-        host.instanceId,
-        access,
-        this.config.ompBin,
-      );
-      await this.leaveCollab(msg.chatId, false);
-      if (this.closing.has(msg.chatId) || this.closed.has(msg.chatId)) throw new Error("会话正在关闭或已关闭。");
-      const guest = connectGuest(link.url, this.config.displayName);
-      const binding: CollabBinding = {
-        kind: "collab",
-        host,
-        access,
-        guest,
-        liveGen: 0,
-        lastOpenId: msg.openId,
-        chain: Promise.resolve(),
-      };
-      this.collab.set(msg.chatId, binding);
-      guest.subscribe((snap) =>
-        this.queueCard(
-          msg.chatId,
-          binding,
-          snap,
-          true,
-          host.sessionName || host.instanceId.slice(0, 8),
-        ),
-      );
+      const managed = await this.groups.get(msg.chatId);
+      if (managed) {
+        await this.bindCollab(msg, host, access);
+      } else {
+        const key = `${msg.openId}:${host.instanceId}`;
+        let operation = this.attachingGroups.get(key);
+        if (!operation) {
+          operation = this.attachGroup(msg, host, access);
+          this.attachingGroups.set(key, operation);
+        }
+        let chatId: string;
+        try { chatId = await operation; } finally {
+          if (this.attachingGroups.get(key) === operation) this.attachingGroups.delete(key);
+        }
+        // 升级前在公共窗口留下的绑定也必须移走，后续输出只发到专用群。
+        await this.leaveCollab(msg.chatId, false);
+        await this.feishu.sendCard(msg.chatId, {
+          title: "TUI 独立会话已准备", template: "green",
+          markdown: "输出和后续对话都在独立会话群中，不再占用当前聊天。点击下方按钮进入；未开通群普通消息权限时请 @机器人。",
+          buttons: [{ text: "进入会话群", action: "open_group", url: groupUrl(chatId, this.config.domain) }],
+        });
+      }
     } catch (err) {
       await this.feishu.sendText(
         msg.chatId,
@@ -417,10 +418,60 @@ export class Bridge {
     }
   }
 
-  private async leaveCollab(chatId: string, notify: boolean): Promise<void> {
+  private async attachGroup(msg: IncomingMessage, host: CollabHost, access: CollabAccess): Promise<string> {
+    let record = (await this.groups.list(msg.openId)).find(group =>
+      group.collab?.instanceId === host.instanceId && !this.closing.has(group.chatId));
+    if (!record) {
+      const name = `omp · ${(host.sessionName || host.instanceId.slice(0, 8)).replace(/[\r\n]/g, " ").slice(0, 60)}`;
+      const requestId = randomUUID().replaceAll("-", "");
+      const chatId = await this.feishu.createSessionGroup(name, msg.openId, requestId);
+      record = { chatId, name, ownerOpenId: msg.openId, requestId, createdAt: new Date().toISOString(),
+        collab: { instanceId: host.instanceId, access } };
+      await this.groups.put(record);
+      await this.store.set(chatId, { cwd: host.cwd ?? this.config.cwd });
+    } else {
+      await this.feishu.joinSessionGroup(record.chatId, msg.openId);
+    }
+    const existing = this.collab.get(record.chatId);
+    if (!existing || existing.access !== access || ["ended", "left"].includes(existing.guest.snapshot().status)) {
+      await this.bindCollab({ ...msg, chatId: record.chatId, chatType: "group" }, host, access);
+    }
+    return record.chatId;
+  }
+
+  private async bindCollab(msg: IncomingMessage, host: CollabHost, access: CollabAccess): Promise<void> {
+    const link = await fetchCollabLink(host.instanceId, access, this.config.ompBin);
+    const record = await this.groups.get(msg.chatId);
+    if (record?.closedAt || this.closing.has(msg.chatId) || this.closed.has(msg.chatId)) {
+      throw new Error("会话正在关闭或已关闭。");
+    }
+    await this.leaveCollab(msg.chatId, false, false);
+    if (record) await this.groups.put({ ...record, collab: { instanceId: host.instanceId, access } });
+    if (this.closing.has(msg.chatId) || this.closed.has(msg.chatId)) throw new Error("会话正在关闭或已关闭。");
+    const guest = connectGuest(link.url, this.config.displayName);
+    const binding: CollabBinding = {
+      kind: "collab", host, access, guest, liveGen: 0, lastOpenId: msg.openId, chain: Promise.resolve(),
+    };
+    this.collab.set(msg.chatId, binding);
+    guest.subscribe((snap) => this.queueCard(
+      msg.chatId, binding, snap, true, host.sessionName || host.instanceId.slice(0, 8),
+    ));
+  }
+
+  private async leaveCollab(chatId: string, notify: boolean, forget = true): Promise<void> {
+    let hadTarget = false;
+    if (forget) {
+      const record = await this.groups.get(chatId);
+      if (record?.collab) {
+        hadTarget = true;
+        const { collab: _, ...rest } = record;
+        await this.groups.put(rest);
+      }
+    }
     const bound = this.collab.get(chatId);
     if (!bound) {
-      if (notify) await this.feishu.sendText(chatId, "当前就是飞书自己的 omp 会话。");
+      if (notify) await this.feishu.sendText(chatId, hadTarget
+        ? "已离开 collab，回到飞书 omp。" : "当前就是飞书自己的 omp 会话。");
       return;
     }
     this.collab.delete(chatId);
@@ -449,7 +500,7 @@ export class Bridge {
   private async requestClose(msg: IncomingMessage, groupId: string): Promise<void> {
     const group = await this.groups.get(groupId);
     if (!group || group.closedAt || group.ownerOpenId !== msg.openId) {
-      throw new Error("只能关闭自己通过 /new 创建的会话群；私聊或普通群不能解散。");
+      throw new Error("只能关闭自己通过机器人创建的会话群；私聊或普通群不能解散。");
     }
     for (const [token, request] of this.closeRequests) {
       if (request.expiresAt < Date.now() || request.groupId === groupId) this.closeRequests.delete(token);
@@ -571,7 +622,7 @@ export class Bridge {
   }
 
   private async setCwd(msg: IncomingMessage, arg: string): Promise<void> {
-    if (this.collab.has(msg.chatId)) {
+    if (this.collab.has(msg.chatId) || (await this.groups.get(msg.chatId))?.collab) {
       await this.feishu.sendText(msg.chatId, "当前接入电脑 TUI，请先 /leave，再选择飞书会话的工作目录。");
       return;
     }
@@ -621,6 +672,11 @@ export class Bridge {
       );
       return;
     }
+    const target = (await this.groups.get(chatId))?.collab;
+    if (target) {
+      await this.feishu.sendText(chatId, `此群绑定电脑 TUI ${target.instanceId}，发送文字会尝试恢复接入；/leave 可解除绑定。`);
+      return;
+    }
     const rpc = this.rpc.get(chatId);
     if (!rpc) {
       await this.feishu.sendText(
@@ -639,7 +695,7 @@ export class Bridge {
   }
 
   private async rpcOrExplain(chatId: string): Promise<RpcBinding | undefined> {
-    if (this.collab.has(chatId)) {
+    if (this.collab.has(chatId) || (await this.groups.get(chatId))?.collab) {
       await this.feishu.sendText(
         chatId,
         "接入 TUI 时请在主机上切模型和思考。/leave 后可用 /model /think。",
@@ -763,6 +819,9 @@ export class Bridge {
 
   private async ensureRpc(chatId: string): Promise<RpcBinding> {
     if (this.closing.has(chatId) || this.closed.has(chatId)) throw new Error("会话正在关闭或已关闭。");
+    if ((await this.groups.get(chatId))?.collab) {
+      throw new Error("此群绑定了电脑 TUI；请先 /leave，再使用飞书独立 omp 会话。");
+    }
     const pending = this.startingRpc.get(chatId);
     if (pending) return pending;
     const operation = this.startRpc(chatId);
