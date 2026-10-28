@@ -1,7 +1,9 @@
 /** 调用本机 `omp collab list/link`，并枚举未分享的 TUI。 */
 
+import { createReadStream } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { startCollabOnTui, listTuiProcesses, parentOf } from "./tui.ts";
 
 export type CollabAccess = "view" | "control";
@@ -133,6 +135,7 @@ function sessionDirForCwd(cwd: string): string {
 
 async function sessionMetaForCwd(
   cwd: string | undefined,
+  sessionId?: string,
 ): Promise<{ sessionId?: string; sessionName?: string }> {
   if (!cwd) return {};
   try {
@@ -141,20 +144,41 @@ async function sessionMetaForCwd(
     let newest: { path: string; mtime: number } | undefined;
     for await (const name of glob.scan({ cwd: dir, onlyFiles: true })) {
       const path = join(dir, name);
+      // 已知会话不能按目录的修改时间猜测，否则同目录多个 TUI 会串名。
+      if (sessionId) {
+        if (name.endsWith(`_${sessionId}.jsonl`)) {
+          newest = { path, mtime: 0 };
+          break;
+        }
+        continue;
+      }
       const stat = await Bun.file(path).stat();
       if (!newest || stat.mtime.getTime() > newest.mtime) {
         newest = { path, mtime: stat.mtime.getTime() };
       }
     }
     if (!newest) return {};
-    const head = await Bun.file(newest.path).text();
-    const line = head.split("\n").find((row) => row.includes('"type":"session"') || row.includes('"type": "session"'));
-    if (!line) return {};
-    const rec = JSON.parse(line) as { id?: unknown; title?: unknown };
-    return {
-      sessionId: typeof rec.id === "string" ? rec.id : undefined,
-      sessionName: typeof rec.title === "string" ? rec.title : undefined,
-    };
+    const input = createReadStream(newest.path, { highWaterMark: 4096 });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    let title: string | undefined;
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const rec = JSON.parse(line) as { type?: unknown; id?: unknown; title?: unknown };
+        // 当前 omp 把可变标题放在首行；session 头部可能仍是改名前的标题。
+        if (rec.type === "title" && typeof rec.title === "string") title = rec.title;
+        if (rec.type !== "session") continue;
+        if (sessionId && rec.id !== sessionId) return {};
+        return {
+          sessionId: typeof rec.id === "string" ? rec.id : undefined,
+          sessionName: title ?? (typeof rec.title === "string" ? rec.title : undefined),
+        };
+      }
+      return {};
+    } finally {
+      lines.close();
+      input.destroy();
+    }
   } catch {
     return {};
   }
@@ -219,13 +243,16 @@ export function mergeConversations(
 
 export async function listLiveConversations(ompBin = "omp"): Promise<LiveConversation[]> {
   const [hosts, tuis] = await Promise.all([listCollabHosts(ompBin), listTuiProcesses()]);
-  const enriched = await Promise.all(
-    tuis.map(async (tui) => {
-      const meta = await sessionMetaForCwd(tui.cwd);
-      return { ...tui, ...meta };
+  return Promise.all(
+    mergeConversations(hosts, tuis).map(async (conversation) => {
+      const meta = await sessionMetaForCwd(conversation.cwd, conversation.sessionId);
+      return {
+        ...conversation,
+        sessionId: meta.sessionId ?? conversation.sessionId,
+        sessionName: meta.sessionName ?? conversation.sessionName,
+      };
     }),
   );
-  return mergeConversations(hosts, enriched);
 }
 
 export function resolveConversation<
